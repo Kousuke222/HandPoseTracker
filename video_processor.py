@@ -26,18 +26,24 @@ class VideoProcessor:
         camera_width: int = 640,
         camera_height: int = 480,
         model_type: int = 2,
-        use_hand_model: bool = True
+        use_hand_model: bool = True,
+        threshold_close_to_open: float = 0.35,
+        threshold_open_to_close: float = 0.45,
+        min_state_duration: float = 0.3
     ):
         """
         初期化
         
         Args:
-            camera_device: カメラデバイス番号または動画ファイルパス
-            camera_width: カメラ幅
-            camera_height: カメラ高さ
-            model_type: MediaPipe Poseモデルタイプ (0:lite, 1:full, 2:heavy)
-            use_hand_model: Handsモデルも使用するか
-        """
+        camera_device: カメラデバイス番号または動画ファイルパス
+        camera_width: カメラ幅
+        camera_height: カメラ高さ
+        model_type: MediaPipe Poseモデルタイプ (0:lite, 1:full, 2:heavy)
+        use_hand_model: Handsモデルも使用するか
+        threshold_close_to_open: 閉→開の閾値
+        threshold_open_to_close: 開→閉の閾値
+        min_state_duration: 状態変化の最小持続時間（秒）
+    """
         self.config = HandPoseConfig()
         
         # パラメータの設定
@@ -46,6 +52,11 @@ class VideoProcessor:
         self.camera_height = camera_height
         self.model_type = model_type
         self.use_hand_model = use_hand_model
+        
+        # ヒステリシス + 時間的連続性のパラメータ
+        self.threshold_close_to_open = threshold_close_to_open
+        self.threshold_open_to_close = threshold_open_to_close
+        self.min_state_duration = min_state_duration
         
         # カメラとMediaPipeの初期化
         self.cap: Optional[cv2.VideoCapture] = None
@@ -61,13 +72,22 @@ class VideoProcessor:
         
         # Handsモデルの初期化
         if self.use_hand_model:
-            self.hand_detector = HandDetector(num_hands=2)
+            self.hand_detector = HandDetector(
+                num_hands=2,
+                threshold_close_to_open=self.threshold_close_to_open,
+                threshold_open_to_close=self.threshold_open_to_close,
+                min_state_duration=self.min_state_duration
+            )
         
         print(f"VideoProcessor初期化完了:")
         print(f"  カメラデバイス: {self.camera_device}")
         print(f"  解像度: {self.camera_width}x{self.camera_height}")
         print(f"  Poseモデル: {self.config.model_names[self.model_type]}")
         print(f"  Handsモデル: {'有効' if self.use_hand_model else '無効'}")
+        if self.use_hand_model:
+            print(f"  閉→開閾値: {self.threshold_close_to_open}")
+            print(f"  開→閉閾値: {self.threshold_open_to_close}")
+            print(f"  最小持続時間: {self.min_state_duration}秒")
 
     def _setup_camera(self) -> None:
         """
