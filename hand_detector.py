@@ -203,8 +203,15 @@ class HandDetector:
         Returns:
             Tuple[str, float]: (状態('O'/'C'/'Unknown'), 信頼度(0-1))
         """
+        # if hand_landmarks is None:
+        #     return "Unknown", 0.0
+
         if hand_landmarks is None:
-            return "Unknown", 0.0
+            # 手がロストした場合、状態管理をリセットして閉状態に戻す
+            self.current_confirmed_state = "C"
+            self.candidate_state = "C"
+            self.candidate_start_time = self.time.time() if hasattr(self, 'time') else None
+            return "C", 0.0  # 閉状態、信頼度0
 
         try:
             # 各指のランドマークインデックス（MCP, PIP, DIP, TIP）

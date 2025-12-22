@@ -52,11 +52,12 @@ class HandPosePublisher(Node):
         self.declare_parameter('fixed_orientation_planning', True)
         self.declare_parameter('use_plane_planning', True)  # 平面プランニングの使用
         self.declare_parameter('plane_planning_x', 0.3)  # 平面プランニングのX座標
+        self.declare_parameter('coordinate_y_flip', True)  # Y座標反転
 
         # ========== 追加: ヒステリシス + 時間的連続性のパラメータ ==========
-        self.declare_parameter('threshold_close_to_open', 0.35)  # 閉→開の閾値
+        self.declare_parameter('threshold_close_to_open', 0.1)  # 閉→開の閾値
         self.declare_parameter('threshold_open_to_close', 0.45)  # 開→閉の閾値
-        self.declare_parameter('min_state_duration', 0.3)  # 状態変化の最小持続時間（秒）
+        self.declare_parameter('min_state_duration', 0.15)  # 状態変化の最小持続時間（秒）
 
         # パラメータの取得
         self.camera_device = self.get_parameter('camera_device').get_parameter_value().integer_value
@@ -173,44 +174,8 @@ class HandPosePublisher(Node):
         self.get_logger().info('キー操作:')
         self.get_logger().info('  Space: セーフティモード（トピック送信停止）')
         self.get_logger().info('  S: セーフティモード解除')
-        self.get_logger().info('  1: 固定位置 (0.3, 0, 0.45) へ移動')
         self.get_logger().info('  ESC: プログラム終了')
         self.get_logger().info('='*50)
-
-    def send_fixed_position(self, x: float, y: float, z: float):
-        """
-        固定位置にPoseメッセージを送信
-        
-        Args:
-            x: X座標
-            y: Y座標
-            z: Z座標
-        """
-        pose_msg = Pose()
-        pose_msg.position.x = x
-        pose_msg.position.y = y
-        pose_msg.position.z = z
-        
-        # 固定姿勢の場合は初期クォータニオン
-        if self.fixed_orientation_planning:
-            pose_msg.orientation.x = 1.0
-            pose_msg.orientation.y = 0.0
-            pose_msg.orientation.z = 0.0
-            pose_msg.orientation.w = 0.0
-        else:
-            # 最後の有効な姿勢があればその向きを使用
-            if self.last_valid_pose:
-                pose_msg.orientation = self.last_valid_pose.orientation
-            else:
-                pose_msg.orientation.x = 1.0
-                pose_msg.orientation.y = 0.0
-                pose_msg.orientation.z = 0.0
-                pose_msg.orientation.w = 0.0
-        
-        self.pose_publisher.publish(pose_msg)
-        self.get_logger().info(
-            f'固定位置へ移動コマンド送信: ({x:.2f}, {y:.2f}, {z:.2f})'
-        )
 
     def draw_safety_status(self, image):
         """
@@ -274,11 +239,11 @@ class HandPosePublisher(Node):
                         hand_result['right_hand']['world_landmarks'],
                         threshold=self.hand_open_threshold
                     )
-                else:
-                    # Poseモデルから簡易的な開閉判定
-                    hand_status, confidence = self.pose_calculator.calculate_hand_status(
-                        pose_result.pose_world_landmarks[0]
-                    )
+                # else:
+                #     # Poseモデルから簡易的な開閉判定
+                #     hand_status, confidence = self.pose_calculator.calculate_hand_status(
+                #         pose_result.pose_world_landmarks[0]
+                #     )
                 
                 if pose_msg:
                     if self.use_plane_planning:
@@ -286,6 +251,10 @@ class HandPosePublisher(Node):
                         # x座標を平面プランニングの値に設定
                         pose_msg.position.x = self.plane_planning_x
 
+                    if self.coordinate_y_flip:
+                        # Y座標を反転
+                        pose_msg.position.y = -pose_msg.position.y
+                        
                     self.last_valid_pose = pose_msg
                     
                     # セーフティモードでない場合のみトピックを公開
@@ -391,11 +360,6 @@ class HandPosePublisher(Node):
                             self.safety_mode_changed = True
                             self.get_logger().info('セーフティモード: 解除 - トピック送信を再開しました')
                             self.get_logger().info("'Space'キーでセーフティモードを有効化できます")
-                    
-                    elif key == ord('1'):  # 1 - 固定位置へ移動
-                        self.send_fixed_position(0.3, 0.0, 0.45)
-                        if self.safety_mode:
-                            self.get_logger().info('（セーフティモード中ですが、固定位置コマンドは送信されました）')
                     
         except KeyboardInterrupt:
             raise
