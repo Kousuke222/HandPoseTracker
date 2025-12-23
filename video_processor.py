@@ -21,73 +21,65 @@ class VideoProcessor:
     """
     
     def __init__(
-        self, 
+        self,
         camera_device: Union[int, str] = 0,
         camera_width: int = 640,
         camera_height: int = 480,
-        model_type: int = 2,
-        use_hand_model: bool = True,
         threshold_close_to_open: float = 0.35,
         threshold_open_to_close: float = 0.45,
         min_state_duration: float = 0.3
     ):
         """
         初期化
-        
+
         Args:
         camera_device: カメラデバイス番号または動画ファイルパス
         camera_width: カメラ幅
         camera_height: カメラ高さ
-        model_type: MediaPipe Poseモデルタイプ (0:lite, 1:full, 2:heavy)
-        use_hand_model: Handsモデルも使用するか
         threshold_close_to_open: 閉→開の閾値
         threshold_open_to_close: 開→閉の閾値
         min_state_duration: 状態変化の最小持続時間（秒）
-    """
+        """
         self.config = HandPoseConfig()
-        
+
         # パラメータの設定
         self.camera_device = camera_device
         self.camera_width = camera_width
         self.camera_height = camera_height
-        self.model_type = model_type
-        self.use_hand_model = use_hand_model
-        
+
         # ヒステリシス + 時間的連続性のパラメータ
         self.threshold_close_to_open = threshold_close_to_open
         self.threshold_open_to_close = threshold_open_to_close
         self.min_state_duration = min_state_duration
-        
+
         # カメラとMediaPipeの初期化
         self.cap: Optional[cv2.VideoCapture] = None
         self.pose_detector: Optional[vision.PoseLandmarker] = None
         self.hand_detector: Optional[HandDetector] = None
-        
+
         # FPS計測
         self.fps_calc = CvFpsCalc(buffer_len=10)
-        
+
         # 初期化実行
         self._setup_camera()
         self._setup_mediapipe()
-        
-        # Handsモデルの初期化
-        if self.use_hand_model:
-            self.hand_detector = HandDetector(
-                num_hands=2,
-                threshold_close_to_open=self.threshold_close_to_open,
-                threshold_open_to_close=self.threshold_open_to_close,
-                min_state_duration=self.min_state_duration
-            )
-        
+
+        # Handsモデルの初期化（常に有効）
+        self.hand_detector = HandDetector(
+            num_hands=2,
+            threshold_close_to_open=self.threshold_close_to_open,
+            threshold_open_to_close=self.threshold_open_to_close,
+            min_state_duration=self.min_state_duration
+        )
+
         print(f"VideoProcessor初期化完了:")
         print(f"  カメラデバイス: {self.camera_device}")
         print(f"  解像度: {self.camera_width}x{self.camera_height}")
-        print(f"  Poseモデル: {self.config.model_names[self.model_type]}")
-        print(f"  Handsモデル: {'有効' if self.use_hand_model else '無効'}")
-        if self.use_hand_model:
-            print(f"  閉→開閾値: {self.threshold_close_to_open}")
-            print(f"  開→閉閾値: {self.threshold_open_to_close}")
-            print(f"  最小持続時間: {self.min_state_duration}秒")
+        print(f"  Poseモデル: heavy（固定）")
+        print(f"  Handsモデル: 有効（固定）")
+        print(f"  閉→開閾値: {self.threshold_close_to_open}")
+        print(f"  開→閉閾値: {self.threshold_open_to_close}")
+        print(f"  最小持続時間: {self.min_state_duration}秒")
 
     def _setup_camera(self) -> None:
         """
@@ -124,22 +116,22 @@ class VideoProcessor:
 
     def _setup_mediapipe(self) -> None:
         """
-        MediaPipe PoseLandmarkerの設定
+        MediaPipe PoseLandmarkerの設定（heavyモデル固定）
         """
         try:
             # モデルパスとURLを取得
-            model_path = self.config.get_model_path(self.model_type)
-            model_url = self.config.get_model_url(self.model_type)
-            
+            model_path = self.config.get_model_path()
+            model_url = self.config.model_url
+
             # モデルディレクトリを作成
             os.makedirs(self.config.model_dir, exist_ok=True)
-            
+
             # モデルファイルをダウンロード（存在しない場合）
             if not os.path.exists(model_path):
                 print(f"Poseモデルファイルをダウンロード中: {model_url}")
                 download_file(url=model_url, save_path=model_path)
                 print(f"ダウンロード完了: {model_path}")
-            
+
             # MediaPipe PoseLandmarkerを作成
             base_options = python.BaseOptions(model_asset_path=model_path)
             options = vision.PoseLandmarkerOptions(
@@ -148,10 +140,10 @@ class VideoProcessor:
                 min_pose_detection_confidence=self.config.min_detection_confidence,
                 min_tracking_confidence=self.config.min_tracking_confidence
             )
-            
+
             self.pose_detector = vision.PoseLandmarker.create_from_options(options)
             print(f"MediaPipe PoseLandmarker作成完了")
-            
+
         except Exception as e:
             print(f"MediaPipe設定エラー: {e}")
             raise
@@ -191,9 +183,9 @@ class VideoProcessor:
             )
             pose_result = self.pose_detector.detect(mp_image)
             
-            # Hand検出実行（有効な場合）
+            # Hand検出実行（常に有効）
             hand_result = None
-            if self.use_hand_model and self.hand_detector:
+            if self.hand_detector:
                 hand_detection = self.hand_detector.detect_hands(rgb_frame)
                 if hand_detection:
                     # 右手と左手を分離

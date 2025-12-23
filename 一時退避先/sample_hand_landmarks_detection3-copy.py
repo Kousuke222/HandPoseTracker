@@ -15,6 +15,97 @@ import matplotlib.pyplot as plt
 from utils import CvFpsCalc
 from utils.download_file import download_file
 
+""" 
+mediapipe奥行き補正アルゴリズム実装の雛形用コード
+
+補正アルゴリズム概要：
+- 補正を行うのは左肘(13)と左手首(15),左人差し指(19)のみ
+  ※注意: cv2.flip(frame, 1)により画像が左右反転されているため、
+         MediaPipeは実際のユーザーの左腕をLEFT側として検出します
+- 入力
+    - mediapipe Poseの検出結果(pose_world_landmarks)
+    - カメラ焦点位置(World座標系,事前にキャリブレーションして得る)
+    - 各関節の長さ(world座標系,事前にキャリブレーションして得る)
+        - 左肩(11)~左肘(13)
+        - 左肘(13)~左手首(15)
+        - 左手首(15)~左人差し指(19)
+- 出力
+    - 補正済みの左肘(13)、左手首(15)、左人差し指(19)の座標で更新したpose_world_landmarks
+- 手順
+    1.事前準備:各関節の長さとカメラの焦点位置のキャリブレーション
+        - 身体のキャリブレーションは肘の場所を明確化するため腕をL字に曲げて手を上げる姿勢で行う。
+        - カメラの焦点位置の確定後は使用者は動かないものとする。
+        1-1.待機状態(text:space to start calibration)
+        1-2.space押下で3秒カウントダウン後、数十フレーム分のランドマーク検出を行う。(text:calibrating...)
+        1-3.各フレームのランドマークから関節長さとカメラ焦点位置を推定し、中央値を採用。
+        1-4.キャリブレーション状態から遷移し、補正を開始。
+    2.中心が右肩、半径が右肩~右肘の長さの球を定義。(球の表面上のどこかに右肘が存在)
+    3.カメラ焦点と右肘座標を通る直線を定義。(直線上のどこかに右肘が存在)
+    4.球と直線の交点を計算し、２点を得る。
+    5.補正前の右肘座標に近い交点を右肘座標として採用し、pose_world_landmarksを更新。 
+        - (旧版：補正前の右肘座標に近い交点を右肘座標として採用)
+        - 交点の採用判断:外れ値対策として前フレームとの連続性を考慮
+    6.補正済みの右肘座標を使用して、同様の方法で右手首、右人差し指の座標も補正する。
+- 追加機能
+    - 補正前後のランドマークを3Dプロットで可視化
+        - SHIFTキーのトグルで補正前のランドマーク表示/非表示切替
+        - 同時に比較するため補正前後のランドマークを同一グラフに重ねて表示
+    - 補正に使用した球と直線を3Dプロットで可視化
+        - Ctrlキーのトグルで表示/非表示切替
+    - spaceキーでキャリブレーションを再実行
+- エッジケース(遭遇した場合、デバック用に事由と対応をPrint)
+    - 球と直線が交わらない場合
+        - 補正をスキップし、元の座標を使用する。
+    - 球と直線が接する場合
+        - 数値計算の誤差で2点が非常に近い場合も含む
+        - 接する1点を採用
+    - 2つの交点が補正前の座標から等距離
+        - 前フレームの連続性から判断
+    -  ランドマークの検出失敗
+        - 補正をスキップし、元の座標を使用する。
+    
+
+        
+"""
+
+"""
+mediapipe pose ランドマークインデックス：
+
+0. nose
+1. left_eye_inner
+2. left_eye
+3. left_eye_outer
+4. right_eye_inner
+5. right_eye
+6. right_eye_outer
+7. left_ear
+8. right_ear
+9. mouth_left
+10. mouth_right
+11. left_shoulder
+12. right_shoulder
+13. left_elbow
+14. right_elbow
+15. left_wrist
+16. right_wrist
+17. left_pinky
+18. right_pinky
+19. left_index
+20. right_index
+21. left_thumb
+22. right_thumb
+23. left_hip
+24. right_hip
+25. left_knee
+26. right_knee
+27. left_ankle
+28. right_ankle
+29. left_heel
+30. right_heel
+31. left_foot_index
+32. right_foot_index
+"""
+
 # ランドマーク描画情報
 POSE_LANDMARK_DRAW_INFO: Dict[int, Dict[str, Union[str, Tuple[int, int, int]]]] = {
     0: {'name': 'NOSE', 'color': (0, 255, 0)},

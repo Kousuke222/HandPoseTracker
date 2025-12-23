@@ -18,20 +18,13 @@ class HandPoseConfig:
 
     def setup_model_config(self):
         """MediaPipeモデル関連の設定"""
-        # モデルURL
-        self.model_urls = [
-            'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task',
-            'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task',
-            'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task',
-        ]
-        
-        # モデル名
-        self.model_names = ['lite', 'full', 'heavy']
-        
+        # モデルURL（heavyモデル固定）
+        self.model_url = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task'
+
         # モデル保存ディレクトリ
         script_dir = os.path.dirname(os.path.abspath(__file__))
         self.model_dir = os.path.join(script_dir, '..', 'models')
-        
+
         # 検出信頼度のしきい値
         self.min_detection_confidence = 0.5
         self.min_tracking_confidence = 0.5
@@ -112,23 +105,11 @@ class HandPoseConfig:
         self.font_scale = 1.0
         self.font_thickness = 2
         self.line_color = (220, 220, 220)
-        
-        # 3D描画設定
-        self.axis_length = 0.6
-        self.axis_colors = {
-            'x': 'red',
-            'y': 'green', 
-            'z': 'blue'
-        }
-        self.axis_linewidth = 3
-        self.marker_size = 100
-        self.plot_limits = (-1.0, 1.0)
-        
+
         # FPS表示設定
         self.fps_position = (10, 30)
         self.fps_color_normal = (0, 255, 0)
-        self.fps_color_segmented = (255, 255, 255)
-        
+
         # ウィンドウ設定
         self.window_name = 'MediaPipe Hand Pose Detection'
         self.window_width = 960
@@ -138,67 +119,30 @@ class HandPoseConfig:
         """ROS関連の設定"""
         # トピック名
         self.pose_topic = 'target_pose'
-        self.debug_topic = 'hand_pose_debug'
-        self.image_topic = 'hand_pose_image'  # 将来の拡張用
-        
+        self.hand_control_topic = 'hand_control'
+
         # QoS設定
         self.queue_size = 10
-        
+
         # パブリッシュレート
-        self.default_publish_rate = 30.0  # Hz
-        
+        self.default_publish_rate = 60.0  # Hz
+
         # ノード名
         self.node_name = 'mp_hand_pose_publisher'
-        
-        # パラメータのデフォルト値
-        self.default_params = {
-            'camera_device': 0,
-            'camera_width': 960,
-            'camera_height': 540,
-            'model_type': 2,  # 0:lite, 1:full, 2:heavy
-            'use_segmentation': False,
-            'use_mirror': True,
-            'use_visualization': True,
-            'publish_rate': 30.0,
-            'debug_mode': True,
-            'enable_smoothing': True,
-            'smoothing_window': 5
-        }
 
-    def get_model_path(self, model_type: int) -> str:
+    def get_model_path(self) -> str:
         """
-        モデルファイルのパスを取得
-        
-        Args:
-            model_type: モデルタイプ (0:lite, 1:full, 2:heavy)
-            
+        モデルファイルのパスを取得（heavyモデル固定）
+
         Returns:
             モデルファイルの完全パス
         """
-        if model_type < 0 or model_type >= len(self.model_urls):
-            model_type = 2  # デフォルトはheavy
-            
-        model_url = self.model_urls[model_type]
-        model_name = model_url.split('/')[-1]
-        quantize_type = model_url.split('/')[-3]
+        model_name = self.model_url.split('/')[-1]
+        quantize_type = self.model_url.split('/')[-3]
         split_name = model_name.split('.')
         model_filename = f"{split_name[0]}_{quantize_type}.{split_name[1]}"
-        
-        return os.path.join(self.model_dir, model_filename)
 
-    def get_model_url(self, model_type: int) -> str:
-        """
-        モデルURLを取得
-        
-        Args:
-            model_type: モデルタイプ
-            
-        Returns:
-            モデルのダウンロードURL
-        """
-        if model_type < 0 or model_type >= len(self.model_urls):
-            model_type = 2  # デフォルトはheavy
-        return self.model_urls[model_type]
+        return os.path.join(self.model_dir, model_filename)
 
     def validate_camera_params(self, device: int, width: int, height: int) -> Tuple[int, int, int]:
         """
