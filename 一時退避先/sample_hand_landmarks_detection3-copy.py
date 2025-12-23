@@ -19,16 +19,18 @@ from utils.download_file import download_file
 mediapipe奥行き補正アルゴリズム実装の雛形用コード
 
 補正アルゴリズム概要：
-- 補正を行うのは右肘(14)と右手首(16),右人差し指(20)のみ
+- 補正を行うのは左肘(13)と左手首(15),左人差し指(19)のみ
+  ※注意: cv2.flip(frame, 1)により画像が左右反転されているため、
+         MediaPipeは実際のユーザーの左腕をLEFT側として検出します
 - 入力
     - mediapipe Poseの検出結果(pose_world_landmarks)
     - カメラ焦点位置(World座標系,事前にキャリブレーションして得る)
     - 各関節の長さ(world座標系,事前にキャリブレーションして得る)
-        - 右肩(12)~右肘(14)
-        - 右肘(14)~右手首(16)
-        - 右手首(16)~右人差し指(20)
+        - 左肩(11)~左肘(13)
+        - 左肘(13)~左手首(15)
+        - 左手首(15)~左人差し指(19)
 - 出力
-    - 補正済みの右肘(14)、右手首(16)、右人差し指(20)の座標で更新したpose_world_landmarks
+    - 補正済みの左肘(13)、左手首(15)、左人差し指(19)の座標で更新したpose_world_landmarks
 - 手順
     1.事前準備:各関節の長さとカメラの焦点位置のキャリブレーション
         - 身体のキャリブレーションは肘の場所を明確化するため腕をL字に曲げて手を上げる姿勢で行う。
@@ -47,7 +49,7 @@ mediapipe奥行き補正アルゴリズム実装の雛形用コード
     - 補正前後のランドマークを3Dプロットで可視化
         - SHIFTキーのトグルで補正前のランドマーク表示/非表示切替
         - 同時に比較するため補正前後のランドマークを同一グラフに重ねて表示
-    - 球と直線を3Dプロットで可視化
+    - 補正に使用した球と直線を3Dプロットで可視化
         - Ctrlキーのトグルで表示/非表示切替
     - spaceキーでキャリブレーションを再実行
 - エッジケース(遭遇した場合、デバック用に事由と対応をPrint)
@@ -274,11 +276,11 @@ class JointLengthCalibrator:
         Returns:
             キャリブレーション完了したかどうか
         """
-        # 右肩(12)、右肘(14)、右手首(16)、右人差し指(20)の座標取得
-        shoulder = pose_world_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER]
-        elbow = pose_world_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_ELBOW]
-        wrist = pose_world_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_WRIST]
-        index = pose_world_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_INDEX]
+        # 左肩(11)、左肘(13)、左手首(15)、左人差し指(19)の座標取得
+        shoulder = pose_world_landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER]
+        elbow = pose_world_landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW]
+        wrist = pose_world_landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST]
+        index = pose_world_landmarks[mp.solutions.pose.PoseLandmark.LEFT_INDEX]
 
         # World座標系（X軸反転済み）
         shoulder_pos = np.array([-shoulder.x, shoulder.y, shoulder.z])
@@ -310,17 +312,21 @@ class JointLengthCalibrator:
             }
 
             print("関節長キャリブレーション完了")
-            print(f"  右肩-右肘: {self.joint_lengths['shoulder_elbow']:.4f}")
-            print(f"  右肘-右手首: {self.joint_lengths['elbow_wrist']:.4f}")
-            print(f"  右手首-右人差し指: {self.joint_lengths['wrist_index']:.4f}")
+            print(f"  左肩-左肘: {self.joint_lengths['shoulder_elbow']:.4f}")
+            print(f"  左肘-左手首: {self.joint_lengths['elbow_wrist']:.4f}")
+            print(f"  左手首-左人差し指: {self.joint_lengths['wrist_index']:.4f}")
             return True
 
         return False
 
 class LandmarkCorrector:
     """ランドマーク補正クラス"""
-    def __init__(self):
+    def __init__(self, radius_margin: float = 0.05, debug_mode: bool = False):
         self.previous_corrected = {}  # 前フレームの補正済み座標（連続性チェック用）
+        self.geometry_info = {}  # 補正に使用したジオメトリ情報（可視化用）
+        self.radius_margin = radius_margin  # 球の半径に追加するマージン（補正の安定性向上）
+        self.debug_mode = debug_mode  # デバッグモード（詳細ログ出力）
+        self.warning_count = {'elbow': 0, 'wrist': 0, 'index': 0}  # 警告カウンター
 
     def correct_landmarks(
         self,
@@ -329,7 +335,7 @@ class LandmarkCorrector:
         joint_lengths: Dict[str, float],
     ):
         """
-        右肘、右手首、右人差し指の座標を補正
+        左肘、左手首、左人差し指の座標を補正
 
         Args:
             pose_world_landmarks: MediaPipe Poseのworld_landmarks
@@ -342,14 +348,20 @@ class LandmarkCorrector:
         # ランドマークのコピーを作成（元データを変更しない）
         corrected_landmarks = copy.deepcopy(pose_world_landmarks)
 
-        # 右肩座標取得（固定点）
-        shoulder = pose_world_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER]
+        # ジオメトリ情報をリセット
+        self.geometry_info = {
+            'spheres': [],  # {'center': np.ndarray, 'radius': float, 'joint_name': str}
+            'lines': [],    # {'point': np.ndarray, 'direction': np.ndarray, 'joint_name': str}
+        }
+
+        # 左肩座標取得（固定点）
+        shoulder = pose_world_landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER]
         shoulder_pos = np.array([-shoulder.x, shoulder.y, shoulder.z])
 
-        # 1. 右肘の補正
+        # 1. 左肘の補正
         elbow_corrected = self._correct_joint(
             parent_pos=shoulder_pos,
-            current_landmark=pose_world_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_ELBOW],
+            current_landmark=pose_world_landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW],
             joint_length=joint_lengths['shoulder_elbow'],
             camera_focal_point=camera_focal_point,
             joint_name='elbow',
@@ -357,44 +369,44 @@ class LandmarkCorrector:
 
         if elbow_corrected is not None:
             # 補正成功：ランドマークを更新
-            corrected_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_ELBOW].x = -elbow_corrected[0]
-            corrected_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_ELBOW].y = elbow_corrected[1]
-            corrected_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_ELBOW].z = elbow_corrected[2]
+            corrected_landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW].x = -elbow_corrected[0]
+            corrected_landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW].y = elbow_corrected[1]
+            corrected_landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW].z = elbow_corrected[2]
         else:
             # 補正失敗：元の座標を使用
-            elbow = pose_world_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_ELBOW]
+            elbow = pose_world_landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW]
             elbow_corrected = np.array([-elbow.x, elbow.y, elbow.z])
 
-        # 2. 右手首の補正（補正済み右肘を基準に）
+        # 2. 左手首の補正（補正済み左肘を基準に）
         wrist_corrected = self._correct_joint(
             parent_pos=elbow_corrected,
-            current_landmark=pose_world_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_WRIST],
+            current_landmark=pose_world_landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST],
             joint_length=joint_lengths['elbow_wrist'],
             camera_focal_point=camera_focal_point,
             joint_name='wrist',
         )
 
         if wrist_corrected is not None:
-            corrected_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_WRIST].x = -wrist_corrected[0]
-            corrected_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_WRIST].y = wrist_corrected[1]
-            corrected_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_WRIST].z = wrist_corrected[2]
+            corrected_landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST].x = -wrist_corrected[0]
+            corrected_landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST].y = wrist_corrected[1]
+            corrected_landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST].z = wrist_corrected[2]
         else:
-            wrist = pose_world_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_WRIST]
+            wrist = pose_world_landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST]
             wrist_corrected = np.array([-wrist.x, wrist.y, wrist.z])
 
-        # 3. 右人差し指の補正（補正済み右手首を基準に）
+        # 3. 左人差し指の補正（補正済み左手首を基準に）
         index_corrected = self._correct_joint(
             parent_pos=wrist_corrected,
-            current_landmark=pose_world_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_INDEX],
+            current_landmark=pose_world_landmarks[mp.solutions.pose.PoseLandmark.LEFT_INDEX],
             joint_length=joint_lengths['wrist_index'],
             camera_focal_point=camera_focal_point,
             joint_name='index',
         )
 
         if index_corrected is not None:
-            corrected_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_INDEX].x = -index_corrected[0]
-            corrected_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_INDEX].y = index_corrected[1]
-            corrected_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_INDEX].z = index_corrected[2]
+            corrected_landmarks[mp.solutions.pose.PoseLandmark.LEFT_INDEX].x = -index_corrected[0]
+            corrected_landmarks[mp.solutions.pose.PoseLandmark.LEFT_INDEX].y = index_corrected[1]
+            corrected_landmarks[mp.solutions.pose.PoseLandmark.LEFT_INDEX].z = index_corrected[2]
 
         return corrected_landmarks
 
@@ -432,22 +444,53 @@ class LandmarkCorrector:
 
         direction = direction / direction_norm  # 正規化
 
-        # 球と直線の交点計算
+        # 補正用の半径（マージンを追加して交点を見つけやすくする）
+        corrected_radius = joint_length + self.radius_margin
+
+        # ジオメトリ情報を保存（可視化用 - 元の半径を保存）
+        self.geometry_info['spheres'].append({
+            'center': parent_pos,
+            'radius': joint_length,  # 元の半径
+            'corrected_radius': corrected_radius,  # マージン追加後の半径
+            'joint_name': joint_name,
+        })
+        self.geometry_info['lines'].append({
+            'point': camera_focal_point,
+            'direction': direction,
+            'current_pos': current_pos,
+            'joint_name': joint_name,
+        })
+
+        # 球と直線の交点計算（マージン追加後の半径を使用）
         has_intersection, intersection1, intersection2 = compute_sphere_line_intersection(
             sphere_center=parent_pos,
-            sphere_radius=joint_length,
+            sphere_radius=corrected_radius,
             line_point=camera_focal_point,
             line_direction=direction,
         )
 
         if not has_intersection:
-            print(f"[WARNING] {joint_name}: 球と直線が交わらない（補正スキップ）")
+            # デバッグ情報: 球の中心から直線までの距離を計算
+            oc = camera_focal_point - parent_pos
+            # 直線上の最近接点までの距離
+            t = np.dot(oc, direction)
+            closest_point = camera_focal_point + t * direction
+            distance_to_line = np.linalg.norm(closest_point - parent_pos)
+
+            # 警告カウンターを更新
+            self.warning_count[joint_name] = self.warning_count.get(joint_name, 0) + 1
+
+            # デバッグモードまたは100回ごとに警告を表示
+            if self.debug_mode or self.warning_count[joint_name] % 100 == 1:
+                print(f"[WARNING] {joint_name}: 球と直線が交わらない（補正スキップ） - 累計: {self.warning_count[joint_name]}回")
+                print(f"  元の半径: {joint_length:.4f}, マージン追加後: {corrected_radius:.4f}")
+                print(f"  直線までの距離: {distance_to_line:.4f}, 不足量: {distance_to_line - corrected_radius:.4f}")
             return None
 
         # 交点が1つの場合（接する）
         if np.allclose(intersection1, intersection2):
-            print(f"[INFO] {joint_name}: 球と直線が接する（1点）")
-            corrected_pos = intersection1
+            # print(f"[INFO] {joint_name}: 球と直線が接する（1点）")
+            selected_intersection = intersection1
         else:
             # 2つの交点から最適な方を選択
             dist1 = np.linalg.norm(intersection1 - current_pos)
@@ -461,13 +504,26 @@ class LandmarkCorrector:
 
                 # 距離が等しい場合は前フレームとの連続性を優先
                 if abs(dist1 - dist2) < 0.01:
-                    corrected_pos = intersection1 if prev_dist1 < prev_dist2 else intersection2
+                    selected_intersection = intersection1 if prev_dist1 < prev_dist2 else intersection2
                 else:
                     # 通常は現在の座標に近い方を選択
-                    corrected_pos = intersection1 if dist1 < dist2 else intersection2
+                    selected_intersection = intersection1 if dist1 < dist2 else intersection2
             else:
                 # 初回フレーム：現在の座標に近い方を選択
-                corrected_pos = intersection1 if dist1 < dist2 else intersection2
+                selected_intersection = intersection1 if dist1 < dist2 else intersection2
+
+        # 重要: 選択した交点の方向を使い、親関節から正確な関節長だけ進んだ位置を計算
+        # （マージン追加した球との交点ではなく、元の関節長を使用）
+        direction_to_intersection = selected_intersection - parent_pos
+        direction_to_intersection_norm = np.linalg.norm(direction_to_intersection)
+
+        if direction_to_intersection_norm < 1e-10:
+            print(f"[WARNING] {joint_name}: 交点が親関節と同じ位置")
+            return None
+
+        # 正規化して、元の関節長でスケール
+        direction_to_intersection = direction_to_intersection / direction_to_intersection_norm
+        corrected_pos = parent_pos + direction_to_intersection * joint_length
 
         # 補正後の座標を記録（次フレームの連続性チェック用）
         self.previous_corrected[joint_name] = corrected_pos
@@ -501,10 +557,12 @@ class CameraFocalPointEstimator:
         """
         
         # 複数の関節点を使用して推定（精度向上）
+        # 補正対象の左腕に関連する点を含める
         landmark_indices = [
-            mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER,
             mp.solutions.pose.PoseLandmark.LEFT_SHOULDER,
+            mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER,
             mp.solutions.pose.PoseLandmark.NOSE,
+            mp.solutions.pose.PoseLandmark.LEFT_ELBOW,
         ]
         
         rays = []
@@ -581,14 +639,19 @@ class CameraFocalPointEstimator:
             # 中央値を使用（外れ値に頑健）
             samples = np.array(self.calibration_samples)
             self.camera_focal_point_world = np.median(samples, axis=0)
-            camera_focal_point_world : np.ndarray = self.camera_focal_point_world 
+            camera_focal_point_world : np.ndarray = self.camera_focal_point_world
+
+            # Y座標の補正値を調整（補正の安定性向上）
+            y_offset = 0.20  # 元の0.30から0.20に変更
+
             self.camera_focal_point_world = np.array([
                 camera_focal_point_world[0],  # X座標 (反転済み)
-                camera_focal_point_world[1] + 0.25,  # Y座標(高さ),上方向に補正
+                camera_focal_point_world[1] + y_offset,  # Y座標(高さ),上方向に補正
                 camera_focal_point_world[2],  # Z座標 (奥行き)
             ])
-            print("キャリブレーション完了")
-            print("カメラ焦点位置（World座標系）:", self.camera_focal_point_world)
+            print("カメラ焦点位置キャリブレーション完了")
+            print(f"  カメラ焦点位置（World座標系）: {self.camera_focal_point_world}")
+            print(f"  Y座標補正値: {y_offset}")
             return True
         
         return False
@@ -659,7 +722,9 @@ def main() -> None:
     joint_length_calibrator = JointLengthCalibrator()
 
     # ランドマーク補正モジュール
-    landmark_corrector = LandmarkCorrector()
+    # radius_margin: 球の半径に追加するマージン（大きいほど交点が見つかりやすい）
+    # debug_mode: True = 全ての警告を表示、False = 100回ごとに表示
+    landmark_corrector = LandmarkCorrector(radius_margin=0.08, debug_mode=True)
 
     # キャリブレーション状態管理
     calibration_state = "waiting"  # "waiting", "calibrating", "completed"
@@ -667,7 +732,7 @@ def main() -> None:
     calibration_start_time = 0
 
     # 可視化設定
-    show_original_landmarks = False  # SHIFTキーでトグル
+    show_original_landmarks = True  # SHIFTキーでトグル
     show_geometry = False  # CTRLキーでトグル
 
     # World座標プロット準備
@@ -776,8 +841,16 @@ def main() -> None:
             continue
 
         # キャリブレーション完了後の処理
+        if calibration_state != "completed":
+            continue
+
         camera_focal_point: np.ndarray = camera_focal_point_estimator.camera_focal_point_world
         joint_lengths: Dict[str, float] = joint_length_calibrator.joint_lengths
+
+        # キャリブレーションデータの有効性チェック
+        if camera_focal_point is None or joint_lengths is None:
+            print("[ERROR] キャリブレーションが完了していません")
+            continue
 
         # ランドマーク補正
         corrected_pose_landmarks = landmark_corrector.correct_landmarks(
@@ -819,6 +892,8 @@ def main() -> None:
                 corrected_detection_result,  # 補正済みを使用
                 camera_focal_point,
                 original_landmarks=pose_detection_result if show_original_landmarks else None,
+                geometry_info=landmark_corrector.geometry_info,
+                show_geometry=show_geometry,
             )
 
         # キー処理
@@ -830,7 +905,7 @@ def main() -> None:
             calibration_state = "waiting"
             camera_focal_point_estimator = CameraFocalPointEstimator()
             joint_length_calibrator = JointLengthCalibrator()
-            landmark_corrector = LandmarkCorrector()
+            landmark_corrector = LandmarkCorrector(radius_margin=0.08, debug_mode=True)
         elif key == 225 or key == 229:  # SHIFT - 補正前ランドマーク表示トグル
             show_original_landmarks = not show_original_landmarks
             print(f"補正前ランドマーク表示: {'ON' if show_original_landmarks else 'OFF'}")
@@ -909,7 +984,7 @@ def draw_image_landmarks(
         cv2.circle(
             image,
             (landmark[0], landmark[1]),  
-            3,  # 半径
+            6,  # 半径
             landmark_draw_info[index]['color'],  # 色
             -1,  # 塗りつぶし
             cv2.LINE_AA  # 線の種類：アンチエイリアス
@@ -1015,6 +1090,8 @@ def draw_world_landmarks(
     detection_result: vision.PoseLandmarkerResult, # type: ignore
     camera_focal_point: np.ndarray,
     original_landmarks = None,  # 補正前のランドマーク（比較表示用）
+    geometry_info = None,  # 補正に使用したジオメトリ情報（球と直線）
+    show_geometry: bool = False,  # ジオメトリ表示フラグ
 ) -> None:
     """姿勢のWorld座標ランドマークを3D空間に描画
 
@@ -1024,6 +1101,8 @@ def draw_world_landmarks(
         detection_result: 姿勢検出結果（補正済み）
         camera_focal_point: カメラ焦点位置
         original_landmarks: 補正前のランドマーク（オプション）
+        geometry_info: 補正に使用したジオメトリ情報（球と直線）
+        show_geometry: ジオメトリ表示フラグ
     """
     for pose_world_landmarks in detection_result.pose_world_landmarks:
         # ランドマーク情報整理（補正済み）
@@ -1042,9 +1121,12 @@ def draw_world_landmarks(
 
         # プロット
         ax.cla()
-        ax.set_xlim3d(-2.0, 2.0)
-        ax.set_ylim3d(-2.0, 2.0)
-        ax.set_zlim3d(-2.0, 2.0)
+        # ax.set_xlim3d(-1.0, 1.0)
+        # ax.set_ylim3d(-1.0, 1.0)
+        # ax.set_zlim3d(-1.0, 1.0)
+        ax.set_xlim3d(-0.6, 0.6)
+        ax.set_ylim3d(-0.6, 0.6)
+        ax.set_zlim3d(-0.6, 0.6)
 
         # 軸ラベル追加
         ax.set_xlabel('X')
@@ -1063,18 +1145,18 @@ def draw_world_landmarks(
             for index, landmark in enumerate(original_landmarks.pose_world_landmarks[0]):
                 orig_landmark_dict[index] = [-landmark.x, landmark.y, landmark.z]
 
-            # 補正対象のみ表示（右肘、右手首、右人差し指）
-            orig_right_arm_indices = [12, 14, 16, 20]  # 右肩、右肘、右手首、右人差し指
-            orig_right_arm_x, orig_right_arm_y, orig_right_arm_z = extract_coordinates(
-                orig_landmark_dict, orig_right_arm_indices
+            # 補正対象のみ表示（左肘、左手首、左人差し指）
+            orig_left_arm_indices = [11, 13, 15, 19]  # 左肩、左肘、左手首、左人差し指
+            orig_left_arm_x, orig_left_arm_y, orig_left_arm_z = extract_coordinates(
+                orig_landmark_dict, orig_left_arm_indices
             )
-            ax.plot(orig_right_arm_x, orig_right_arm_y, orig_right_arm_z,
-                   c='red', linewidth=2, linestyle='--', alpha=0.5, label='Original Right Arm')
+            ax.plot(orig_left_arm_x, orig_left_arm_y, orig_left_arm_z,
+                   c='cyan', linewidth=2, linestyle='--', alpha=0.5, label='Original Left Arm')
 
         # 補正済みをプロット
         ax.scatter(face_x, face_y, face_z, c='yellow', s=50, label='Face')
-        ax.plot(right_arm_x, right_arm_y, right_arm_z, c='red', linewidth=2, label='Right Arm (Corrected)')
-        ax.plot(left_arm_x, left_arm_y, left_arm_z, c='blue', linewidth=2, label='Left Arm')
+        ax.plot(right_arm_x, right_arm_y, right_arm_z, c='red', linewidth=2, label='Right Arm')
+        ax.plot(left_arm_x, left_arm_y, left_arm_z, c='blue', linewidth=2, label='Left Arm (Corrected)')
         ax.plot(right_body_x, right_body_y, right_body_z, c='orange', linewidth=2)
         ax.plot(left_body_x, left_body_y, left_body_z, c='cyan', linewidth=2)
         ax.plot(shoulder_x, shoulder_y, shoulder_z, c='green', linewidth=2, label='Shoulder')
@@ -1091,8 +1173,42 @@ def draw_world_landmarks(
             label='Camera Focal Point'
         )
 
+        # ジオメトリ表示（CTRL押下時）
+        if show_geometry and geometry_info:
+            # 球の描画
+            for sphere in geometry_info.get('spheres', []):
+                center = sphere['center']
+                radius = sphere['radius']
+                joint_name = sphere['joint_name']
+
+                # 球面をメッシュで描画
+                u = np.linspace(0, 2 * np.pi, 20)
+                v = np.linspace(0, np.pi, 20)
+                x = center[0] + radius * np.outer(np.cos(u), np.sin(v))
+                y = center[2] + radius * np.outer(np.sin(u), np.sin(v))
+                z = center[1] + radius * np.outer(np.ones(np.size(u)), np.cos(v))
+
+                ax.plot_surface(x, y, z, alpha=0.2, color='green')
+
+            # 直線の描画
+            for line in geometry_info.get('lines', []):
+                point = line['point']
+                direction = line['direction']
+                current_pos = line['current_pos']
+
+                # カメラ焦点から現在位置まで直線を引く
+                line_length = np.linalg.norm(current_pos - point) * 1.2  # 少し長めに
+                end_point = point + direction * line_length
+
+                ax.plot(
+                    [point[0], end_point[0]],
+                    [point[2], end_point[2]],
+                    [point[1], end_point[1]],
+                    c='magenta', linewidth=1, linestyle=':', alpha=0.6
+                )
+
         # 凡例表示(重複を避けるため一度だけ表示)
-        ax.legend(loc='upper right', fontsize=8)
+        ax.legend(loc='lower right', fontsize=4)
 
     plt.pause(.001)
 
