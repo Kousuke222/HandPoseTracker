@@ -40,6 +40,7 @@ class HandPosePublisher(Node):
         self.declare_parameter('threshold_close_to_open', 0.1)  # 閉→開の閾値
         self.declare_parameter('threshold_open_to_close', 0.45)  # 開→閉の閾値
         self.declare_parameter('min_state_duration', 0.15)  # 状態変化の最小持続時間（秒）
+        self.declare_parameter('use_hands_orientation', True)  # Handsモデルによる向き計算の有効/無効
 
         # パラメータの取得
         self.camera_device = self.get_parameter('camera_device').get_parameter_value().integer_value
@@ -53,6 +54,7 @@ class HandPosePublisher(Node):
         self.threshold_close_to_open = self.get_parameter('threshold_close_to_open').get_parameter_value().double_value
         self.threshold_open_to_close = self.get_parameter('threshold_open_to_close').get_parameter_value().double_value
         self.min_state_duration = self.get_parameter('min_state_duration').get_parameter_value().double_value
+        self.use_hands_orientation = self.get_parameter('use_hands_orientation').get_parameter_value().bool_value
 
         # 固定値設定
         self.camera_width = 640
@@ -83,6 +85,8 @@ class HandPosePublisher(Node):
                 hand_open_threshold=self.hand_open_threshold,
                 fixed_orientation_planning=self.fixed_orientation_planning
             )
+            # ROSパラメータをconfigに反映
+            self.pose_calculator.config.use_hands_orientation = self.use_hands_orientation
 
             self.video_processor = VideoProcessor(
                 camera_device=self.camera_device,
@@ -127,6 +131,7 @@ class HandPosePublisher(Node):
         self.get_logger().info(f'  最小持続時間: {self.min_state_duration}秒')
         self.get_logger().info(f'  Dynamixel ID: {self.dynamixel_id}')
         self.get_logger().info(f'  Orientation固定: {self.fixed_orientation_planning}')
+        self.get_logger().info(f'  Handsモデルによる手の向き計算: {self.use_hands_orientation}')
         self.get_logger().info(f'  平面プランニング使用: {self.use_plane_planning}')
         self.get_logger().info(f'  平面プランニングX: {self.plane_planning_x}')
         self.get_logger().info(f'  Y座標反転: {self.coordinate_y_flip}')
@@ -185,14 +190,21 @@ class HandPosePublisher(Node):
             pose_msg = None
             hand_status = "Unknown"
             confidence = 0.0
-            
+
             # Poseモデルから姿勢を計算
             if pose_result and len(pose_result.pose_world_landmarks) > 0:
+                # Handsモデルの結果を取得（利用可能な場合）
+                hand_world_landmarks = None
+                if hand_result and hand_result['right_hand']['world_landmarks']:
+                    hand_world_landmarks = hand_result['right_hand']['world_landmarks']
+
+                # 位置（Pose）+ 向き（Hands）で姿勢を計算
                 pose_msg = self.pose_calculator.calculate_and_convert_pose(
-                    pose_result.pose_world_landmarks[0]
+                    pose_result.pose_world_landmarks[0],
+                    hand_world_landmarks=hand_world_landmarks
                 )
 
-                # Handsモデルから高精度な開閉判定（常に使用）
+                # Handsモデルから開閉判定
                 if hand_result and hand_result['right_hand']['world_landmarks']:
                     hand_status, confidence = self.video_processor.hand_detector.calculate_hand_openness(
                         hand_result['right_hand']['world_landmarks'],

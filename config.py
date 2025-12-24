@@ -13,6 +13,7 @@ class HandPoseConfig:
     def __init__(self):
         self.setup_model_config()
         self.setup_landmark_config()
+        self.setup_hand_orientation_config()
         self.setup_visualization_config()
         self.setup_ros_config()
 
@@ -96,6 +97,31 @@ class HandPoseConfig:
             'right_leg': [24, 26, 28, 30, 32],
             'torso': [11, 12, 23, 24]
         }
+
+    def setup_hand_orientation_config(self):
+        """手のひら向き計算関連の設定"""
+        # 最小二乗平面法による向き計算の有効/無効（デフォルト: 有効）
+        self.use_hands_orientation = True
+
+        # Handsモデルのランドマークインデックス
+        self.hand_mcp_indices = {
+            'thumb': 1,      # 親指の付け根（CMC）
+            'index': 5,      # 人差し指の付け根（MCP）
+            'middle': 9,     # 中指の付け根（MCP）
+            'ring': 13,      # 薬指の付け根（MCP）
+            'pinky': 17      # 小指の付け根（MCP）
+        }
+        self.hand_wrist_index = 0
+        self.hand_middle_tip_index = 12
+
+        # 最小二乗平面法関連
+        self.min_mcp_landmarks = 3  # 最低必要なMCPランドマーク数
+        self.planarity_threshold = 0.01  # 特異値比の閾値
+        self.orientation_timeout = 3.0  # 秒（検出タイムアウト）
+
+        # クォータニオン平滑化
+        self.use_slerp_smoothing = True  # SLERP補間の使用
+        self.slerp_alpha = 0.3  # SLERP補間の重み（0-1）
 
     def setup_visualization_config(self):
         """可視化関連の設定"""

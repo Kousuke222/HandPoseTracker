@@ -46,17 +46,27 @@ class PoseCalculator:
         self.hand_open_threshold = hand_open_threshold
         self.hand_status_history = []
         self.hand_status_history_size = 3
-        
+
         self.fixed_orientation_planning = fixed_orientation_planning
 
-    def calculate_and_convert_pose(self, pose_world_landmarks) -> Optional[Pose]:
+        # 向き計算の履歴管理（タイムアウト処理用）
+        self.last_valid_orientation = None
+        self.last_orientation_time = None
+        self.previous_quaternion = None
+
+        # time モジュールのインポート
+        import time
+        self.time = time
+
+    def calculate_and_convert_pose(self, pose_world_landmarks, hand_world_landmarks=None) -> Optional[Pose]:
         """
         MediaPipeのワールドランドマークからROS Poseメッセージを生成
         ミラー表示で固定
-        
+
         Args:
-            pose_world_landmarks: MediaPipeのワールドランドマーク
-            
+            pose_world_landmarks: MediaPipeのワールドランドマーク（Poseモデル）
+            hand_world_landmarks: MediaPipeのワールドランドマーク（Handsモデル、オプション）
+
         Returns:
             ROS Poseメッセージ（計算失敗時はNone）
         """
@@ -64,24 +74,39 @@ class PoseCalculator:
             # ランドマークの信頼度チェック
             if not self._validate_landmarks(pose_world_landmarks):
                 return None
-            
+
             # ランドマーク辞書を作成（ミラー表示固定）
             landmark_dict = self._create_landmark_dict(pose_world_landmarks)
-            
-            # 右手の姿勢を計算
-            rotation_matrix, quaternion, wrist_position = self._calculate_hand_pose(landmark_dict)
-            
-            if rotation_matrix is None:
+
+            # 位置: Poseモデルの手首（インデックス15）を使用
+            if 15 not in landmark_dict:
                 return None
-            
+            wrist_position = np.array(landmark_dict[15])
+
+            # 向き: Handsモデルがあれば最小二乗平面法、なければPoseモデルから計算
+            quaternion = None
+            if hand_world_landmarks is not None and not self.fixed_orientation_planning and self.config.use_hands_orientation:
+                quaternion = self._calculate_hand_orientation_from_hands(hand_world_landmarks)
+
+            # Handsモデルが使えない、または固定姿勢の場合
+            if quaternion is None:
+                if self.fixed_orientation_planning:
+                    # 固定姿勢
+                    quaternion = np.array([1.0, 0.0, 0.0, 0.0])
+                else:
+                    # Poseモデルから計算（既存の方法）
+                    _, quaternion, _ = self._calculate_hand_pose(landmark_dict)
+                    if quaternion is None:
+                        return None
+
             # ROS Poseメッセージに変換
             pose_msg = self._create_pose_message(wrist_position, quaternion)
-            
+
             # 平滑化
             pose_msg = self._smooth_pose(pose_msg)
-            
+
             return pose_msg
-            
+
         except Exception as e:
             print(f"姿勢計算エラー: {e}")
             return None
@@ -392,13 +417,219 @@ class PoseCalculator:
     def get_pose_info(self, pose_msg: Pose) -> str:
         """
         デバッグ用の姿勢情報文字列を生成
-        
+
         Args:
             pose_msg: Poseメッセージ
-            
+
         Returns:
             姿勢情報の文字列
         """
         return f"Position: ({pose_msg.position.x:.3f}, {pose_msg.position.y:.3f}, {pose_msg.position.z:.3f}), " \
                f"Orientation: ({pose_msg.orientation.x:.3f}, {pose_msg.orientation.y:.3f}, " \
                f"{pose_msg.orientation.z:.3f}, {pose_msg.orientation.w:.3f})"
+
+    def _calculate_hand_orientation_from_hands(self, hand_world_landmarks) -> Optional[np.ndarray]:
+        """
+        Handsモデルのランドマークから最小二乗平面法で向きを計算
+
+        Args:
+            hand_world_landmarks: Handsモデルのワールドランドマーク
+
+        Returns:
+            クォータニオン [x, y, z, w] または None（計算失敗時）
+        """
+        try:
+            current_time = self.time.time()
+
+            # Handsモデルが検出されていない場合のフォールバック
+            if hand_world_landmarks is None:
+                if self.last_valid_orientation is not None and self.last_orientation_time is not None:
+                    time_since_last = current_time - self.last_orientation_time
+                    if time_since_last < self.config.orientation_timeout:
+                        # タイムアウト前: 前回値を保持
+                        return self.last_valid_orientation
+                # タイムアウト後: デフォルト姿勢
+                return np.array([1.0, 0.0, 0.0, 0.0])
+
+            # MCP関節のランドマークを収集（ミラー表示のためX座標反転）
+            mcp_points = []
+            mcp_indices_list = list(self.config.hand_mcp_indices.values())
+
+            for idx in mcp_indices_list:
+                if idx < len(hand_world_landmarks):
+                    landmark = hand_world_landmarks[idx]
+                    # ミラー表示のためX座標反転
+                    point = np.array([
+                        -landmark.x,  # ミラー反転
+                        landmark.y,
+                        landmark.z
+                    ])
+                    mcp_points.append(point)
+
+            # 最低必要数のランドマークがあるかチェック
+            if len(mcp_points) < self.config.min_mcp_landmarks:
+                # フォールバック: 前回値または簡易法
+                if self.last_valid_orientation is not None:
+                    return self.last_valid_orientation
+                return None
+
+            # 最小二乗平面法で法線ベクトルを計算
+            z_axis_candidate, planarity = self._least_squares_plane_normal(mcp_points)
+
+            # 平面性が低い場合（点がほぼ一直線上）
+            if planarity < self.config.planarity_threshold:
+                if self.last_valid_orientation is not None:
+                    return self.last_valid_orientation
+                return None
+
+            # 手首と中指先端を取得（向き判定用）
+            if self.config.hand_wrist_index >= len(hand_world_landmarks) or \
+               self.config.hand_middle_tip_index >= len(hand_world_landmarks):
+                return None
+
+            wrist = hand_world_landmarks[self.config.hand_wrist_index]
+            middle_tip = hand_world_landmarks[self.config.hand_middle_tip_index]
+
+            # ミラー表示対応
+            wrist_pos = np.array([-wrist.x, wrist.y, wrist.z])
+            middle_tip_pos = np.array([-middle_tip.x, middle_tip.y, middle_tip.z])
+
+            # 法線の向きを判定（手のひら側を+Z方向に）
+            finger_direction = middle_tip_pos - wrist_pos
+            if np.dot(z_axis_candidate, finger_direction) < 0:
+                z_axis = -z_axis_candidate
+            else:
+                z_axis = z_axis_candidate
+
+            # X軸を計算（指先方向）
+            x_axis = finger_direction / np.linalg.norm(finger_direction)
+
+            # Y軸を計算（直交性を保証）
+            y_axis = np.cross(z_axis, x_axis)
+            y_axis = y_axis / np.linalg.norm(y_axis)
+
+            # X軸を再計算（完全な直交座標系にするため）
+            x_axis = np.cross(y_axis, z_axis)
+            x_axis = x_axis / np.linalg.norm(x_axis)
+
+            # MediaPipe座標系 -> ロボット座標系変換
+            # MediaPipe: Y軸下向き, Z軸カメラ向き
+            # ロボット: X軸前向き, Y軸左向き, Z軸上向き
+            # 変換: [X, Y, Z]_mp -> [Z, X, -Y]_robot
+            robot_x_axis = np.array([x_axis[2], x_axis[0], -x_axis[1]])
+            robot_y_axis = np.array([y_axis[2], y_axis[0], -y_axis[1]])
+            robot_z_axis = np.array([z_axis[2], z_axis[0], -z_axis[1]])
+
+            # 回転行列を構築
+            rotation_matrix = np.stack([robot_x_axis, robot_y_axis, robot_z_axis], axis=1)
+
+            # クォータニオンに変換
+            rot = R.from_matrix(rotation_matrix)
+            quaternion = rot.as_quat()  # [x, y, z, w]形式
+
+            # クォータニオンの連続性を保証
+            if self.previous_quaternion is not None:
+                quaternion = self._ensure_quaternion_continuity(quaternion, self.previous_quaternion)
+
+            # SLERP補間による平滑化
+            if self.config.use_slerp_smoothing and self.previous_quaternion is not None:
+                quaternion = self._slerp(self.previous_quaternion, quaternion, self.config.slerp_alpha)
+
+            # 状態更新
+            self.last_valid_orientation = quaternion
+            self.last_orientation_time = current_time
+            self.previous_quaternion = quaternion
+
+            return quaternion
+
+        except Exception as e:
+            print(f"Handsモデルによる向き計算エラー: {e}")
+            # フォールバック: 前回値
+            if self.last_valid_orientation is not None:
+                return self.last_valid_orientation
+            return None
+
+    def _least_squares_plane_normal(self, points: List[np.ndarray]) -> Tuple[np.ndarray, float]:
+        """
+        最小二乗法により点群から平面の法線ベクトルを計算
+
+        Args:
+            points: 3次元点のリスト
+
+        Returns:
+            (法線ベクトル, 平面性スコア)
+            平面性スコア = S[2] / S[0]（特異値の比率）
+        """
+        try:
+            # 重心を計算
+            points_array = np.array(points)
+            centroid = np.mean(points_array, axis=0)
+
+            # 各点から重心へのベクトル
+            centered_points = points_array - centroid
+
+            # 共分散行列を計算
+            covariance_matrix = np.dot(centered_points.T, centered_points) / len(points)
+
+            # SVD分解
+            U, S, Vt = np.linalg.svd(covariance_matrix)
+
+            # 最小固有値に対応する固有ベクトルが法線ベクトル
+            normal_vector = Vt[-1]
+
+            # 平面性スコア（特異値の比率）
+            planarity_score = S[2] / S[0] if S[0] > 1e-6 else 0.0
+
+            return normal_vector, planarity_score
+
+        except Exception as e:
+            print(f"最小二乗平面法エラー: {e}")
+            return np.array([0, 0, 1]), 0.0
+
+    def _slerp(self, quat1: np.ndarray, quat2: np.ndarray, alpha: float) -> np.ndarray:
+        """
+        球面線形補間（SLERP）
+
+        Args:
+            quat1: 開始クォータニオン [x, y, z, w]
+            quat2: 終了クォータニオン [x, y, z, w]
+            alpha: 補間パラメータ（0-1）
+
+        Returns:
+            補間されたクォータニオン [x, y, z, w]
+        """
+        try:
+            # scipy.spatial.transform.Rotationを使用
+            rot1 = R.from_quat(quat1)
+            rot2 = R.from_quat(quat2)
+
+            # SLERPキーフレーム
+            key_times = [0, 1]
+            key_rots = R.from_quat([quat1, quat2])
+
+            # Slerpを使用
+            from scipy.spatial.transform import Slerp
+            slerp = Slerp(key_times, key_rots)
+            interpolated_rot = slerp([alpha])[0]
+
+            return interpolated_rot.as_quat()
+
+        except Exception as e:
+            print(f"SLERP補間エラー: {e}")
+            return quat2
+
+    def _ensure_quaternion_continuity(self, current_quat: np.ndarray, previous_quat: np.ndarray) -> np.ndarray:
+        """
+        クォータニオンの符号反転をチェックして連続性を保証
+
+        Args:
+            current_quat: 現在のクォータニオン
+            previous_quat: 前回のクォータニオン
+
+        Returns:
+            符号調整されたクォータニオン
+        """
+        # クォータニオンのジャンプ防止
+        if np.dot(current_quat, previous_quat) < 0:
+            return -current_quat
+        return current_quat
