@@ -39,12 +39,13 @@ mediapipe奥行き補正アルゴリズム実装の雛形用コード
         1-2.space押下で3秒カウントダウン後、数十フレーム分のランドマーク検出を行う。(text:calibrating...)
         1-3.各フレームのランドマークから関節長さとカメラ焦点位置を推定し、中央値を採用。
         1-4.キャリブレーション状態から遷移し、補正を開始。
-    2.中心が右肩、半径が右肩~右肘の長さの球を定義。(球の表面上のどこかに右肘が存在)
-    3.カメラ焦点と右肘座標を通る直線を定義。(直線上のどこかに右肘が存在)
+    2.中心が左肩、半径が左肩~左肘の長さの球を定義。(球の表面上のどこかに左肘が存在)
+    3.カメラ焦点と左肘座標を通る直線を定義。(直線上のどこかに左肘が存在)
     4.球と直線の交点を計算し、２点を得る。
-    5.補正前の右肘座標に近い交点を右肘座標として採用し、pose_world_landmarksを更新。 
-        - 交点の採用判断:外れ値対策として前フレームとの連続性を考慮
-    6.補正済みの右肘座標を使用して、同様の方法で右手首、右人差し指の座標も補正する。
+    5.カメラ焦点位置に近い交点の方向を採用し、その方向に関節長だけ進んだ位置を左肘座標とする。
+        - 交点の採用判断:基本的にカメラに近い方を選択、ただし前フレームとの連続性も考慮
+        - 旧版：補正前の左肘座標に近い交点を採用（MediaPipeの誤差に影響されやすい）
+    6.補正済みの左肘座標を使用して、同様の方法で左手首、左人差し指の座標も補正する。
 - 追加機能
     - 補正前後のランドマークを3Dプロットで可視化
         - SHIFTキーのトグルで補正前のランドマーク表示/非表示切替
@@ -493,24 +494,33 @@ class LandmarkCorrector:
             selected_intersection = intersection1
         else:
             # 2つの交点から最適な方を選択
-            dist1 = np.linalg.norm(intersection1 - current_pos)
-            dist2 = np.linalg.norm(intersection2 - current_pos)
+            # 戦略: カメラ焦点位置に近い方を採用（物理的に妥当な補正）
+            camera_dist1 = np.linalg.norm(intersection1 - camera_focal_point)
+            camera_dist2 = np.linalg.norm(intersection2 - camera_focal_point)
 
-            # 前フレームとの連続性チェック
+            # 前フレームとの連続性チェック（急激な変化を抑制）
             if joint_name in self.previous_corrected:
                 prev_pos = self.previous_corrected[joint_name]
                 prev_dist1 = np.linalg.norm(intersection1 - prev_pos)
                 prev_dist2 = np.linalg.norm(intersection2 - prev_pos)
 
-                # 距離が等しい場合は前フレームとの連続性を優先
-                if abs(dist1 - dist2) < 0.01:
-                    selected_intersection = intersection1 if prev_dist1 < prev_dist2 else intersection2
+                # カメラ距離が近い方を基本的に選択
+                # ただし、前フレームとの距離差が大きい場合は連続性を優先
+                closer_to_camera = intersection1 if camera_dist1 < camera_dist2 else intersection2
+                farther_from_camera = intersection2 if camera_dist1 < camera_dist2 else intersection1
+
+                closer_prev_dist = prev_dist1 if camera_dist1 < camera_dist2 else prev_dist2
+                farther_prev_dist = prev_dist2 if camera_dist1 < camera_dist2 else prev_dist1
+
+                # カメラに近い方を選ぶが、前フレームとの距離差が大きすぎる場合は遠い方を選ぶ
+                # （閾値: 0.1m = 10cm）
+                if closer_prev_dist < 0.1 or closer_prev_dist < farther_prev_dist:
+                    selected_intersection = closer_to_camera
                 else:
-                    # 通常は現在の座標に近い方を選択
-                    selected_intersection = intersection1 if dist1 < dist2 else intersection2
+                    selected_intersection = farther_from_camera
             else:
-                # 初回フレーム：現在の座標に近い方を選択
-                selected_intersection = intersection1 if dist1 < dist2 else intersection2
+                # 初回フレーム：カメラ焦点位置に近い方を選択
+                selected_intersection = intersection1 if camera_dist1 < camera_dist2 else intersection2
 
         # 重要: 選択した交点の方向を使い、親関節から正確な関節長だけ進んだ位置を計算
         # （マージン追加した球との交点ではなく、元の関節長を使用）
@@ -1161,6 +1171,22 @@ def draw_world_landmarks(
         ax.plot(left_body_x, left_body_y, left_body_z, c='cyan', linewidth=2)
         ax.plot(shoulder_x, shoulder_y, shoulder_z, c='green', linewidth=2, label='Shoulder')
         ax.plot(waist_x, waist_y, waist_z, c='purple', linewidth=2, label='Waist')
+
+        # 補正している左手首の位置を強調表示（ピンクの大きな丸）
+        if 15 in landmark_dict:  # LEFT_WRIST = 15
+            wrist_pos = landmark_dict[15]
+            ax.scatter(
+                wrist_pos[0],  # X座標
+                wrist_pos[1],  # Z座標
+                wrist_pos[2],  # Y座標
+                c='hotpink',
+                s=20,
+                marker='o',
+                edgecolors='magenta',
+                linewidths=2,
+                label='Left Wrist (Corrected)',
+                zorder=10  # 最前面に表示
+            )
 
         # カメラ焦点位置プロット
         ax.scatter(
