@@ -1,0 +1,16 @@
+# Depth-Anything-V2 Webcam Demo Requirements
+
+# 基本ライブラリ
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Depth-Anything-V2の依存関係
+# 注: Depth-Anything-V2本体は別途cloneが必要です
+# git clone https://github.com/DepthAnything/Depth-Anything-V2.git
+
+# オプション: より高速な推論のため
+# onnx>=1.14.0
+# onnxruntime-gpu>=1.15.0  # GPUを使用する場合
