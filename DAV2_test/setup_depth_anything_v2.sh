@@ -10,8 +10,10 @@ echo ""
 
 # カレントディレクトリを取得
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# DAV2_test -> hand_pose_tracker -> hand_pose_tracker -> src (3つ上)
 WORKSPACE_DIR="${SCRIPT_DIR}/../../.."
 
+echo "スクリプトディレクトリ: ${SCRIPT_DIR}"
 echo "ワークスペース: ${WORKSPACE_DIR}"
 echo ""
 

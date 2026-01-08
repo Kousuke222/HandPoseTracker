@@ -89,17 +89,26 @@ class DepthEstimator:
 
     def find_checkpoint(self, encoder):
         """チェックポイントファイルを探す"""
+        # 現在のスクリプトのディレクトリから相対的にパスを構築
+        script_dir = Path(__file__).parent
+
         # よくあるパスのパターン
         possible_paths = [
+            # DAV2_test -> hand_pose_tracker -> hand_pose_tracker -> src -> Depth-Anything-V2/checkpoints (3つ上)
+            script_dir / "../../.." / "Depth-Anything-V2" / "checkpoints" / f"depth_anything_v2_{encoder}.pth",
+            # カレントディレクトリからの相対パス
             Path(f"checkpoints/depth_anything_v2_{encoder}.pth"),
             Path(f"../checkpoints/depth_anything_v2_{encoder}.pth"),
             Path(f"../../Depth-Anything-V2/checkpoints/depth_anything_v2_{encoder}.pth"),
+            Path(f"../../../Depth-Anything-V2/checkpoints/depth_anything_v2_{encoder}.pth"),
+            # キャッシュディレクトリ
             Path.home() / f".cache/depth_anything_v2/depth_anything_v2_{encoder}.pth",
         ]
 
         for path in possible_paths:
-            if path.exists():
-                return str(path)
+            resolved_path = path.resolve()
+            if resolved_path.exists():
+                return str(resolved_path)
         return None
 
     def predict(self, image):

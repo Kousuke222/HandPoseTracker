@@ -18,12 +18,15 @@ Depth-Anything-V2を使用してWebカメラからの映像をリアルタイム
 
 ```bash
 # 1. このディレクトリに移動
-cd ~/xarm_ws/src/hand_pose_tracker/hand_pose_tracker
+cd ~/xarm_ws/src/hand_pose_tracker/hand_pose_tracker/DAV2_test
 
-# 2. 自動セットアップを実行
+# 2. 自動セットアップを実行 (Depth-Anything-V2が既にある場合はスキップ可能)
 ./setup_depth_anything_v2.sh
 
-# 3. デモを実行
+# 3. セットアップ確認 (オプション)
+./check_setup.sh
+
+# 4. デモを実行
 ./run_demo.sh
 ```
 
@@ -39,14 +42,36 @@ cd ~/xarm_ws/src/hand_pose_tracker/hand_pose_tracker
 ### 方法1: 自動セットアップ（推奨）
 
 ```bash
+# DAV2_testディレクトリに移動
+cd ~/xarm_ws/src/hand_pose_tracker/hand_pose_tracker/DAV2_test
+
 # セットアップスクリプトを実行
 ./setup_depth_anything_v2.sh
 ```
 
 このスクリプトは以下を自動的に実行します:
 - 依存関係のインストール
-- Depth-Anything-V2のクローン
+- Depth-Anything-V2のクローン (まだない場合のみ)
 - モデル(Vit-Small)のダウンロード
+
+**注意**: 新しいファイル構成では以下のようになっています:
+- Depth-Anything-V2: `/home/xarm-in-case/xarm_ws/src/Depth-Anything-V2/`
+- デモスクリプト: `/home/xarm-in-case/xarm_ws/src/hand_pose_tracker/hand_pose_tracker/DAV2_test/`
+
+#### セットアップ確認
+
+セットアップが正しく完了したか確認するには:
+
+```bash
+./check_setup.sh
+```
+
+このスクリプトは以下を確認します:
+- Depth-Anything-V2のディレクトリ
+- depth_anything_v2モジュール
+- チェックポイントファイル
+- Python依存関係
+- モジュールのインポート
 
 ### 方法2: 手動セットアップ
 
