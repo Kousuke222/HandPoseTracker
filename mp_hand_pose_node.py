@@ -7,6 +7,7 @@ from std_msgs.msg import String
 from geometry_msgs.msg import Pose
 import cv2
 import copy
+import time
 from typing import Optional, Tuple
 
 # hand_control_interfacesパッケージからMoveHandメッセージをインポート
@@ -17,6 +18,7 @@ from .pose_calculator import PoseCalculator
 from .video_processor import VideoProcessor
 from .visualizer import Visualizer
 from .config import HandPoseConfig
+from .depth_estimator import DepthEstimator
 
 
 class HandPosePublisher(Node):
@@ -40,6 +42,8 @@ class HandPosePublisher(Node):
         self.declare_parameter('threshold_close_to_open', 0.1)  # 閉→開の閾値
         self.declare_parameter('threshold_open_to_close', 0.45)  # 開→閉の閾値
         self.declare_parameter('min_state_duration', 0.15)  # 状態変化の最小持続時間（秒）
+        self.declare_parameter('use_depth_estimation', False)  # 深度推定の使用
+        self.declare_parameter('depth_window_radius', 5)  # 深度取得の円状領域の半径（ピクセル）
 
         # パラメータの取得
         self.camera_device = self.get_parameter('camera_device').get_parameter_value().integer_value
@@ -53,6 +57,8 @@ class HandPosePublisher(Node):
         self.threshold_close_to_open = self.get_parameter('threshold_close_to_open').get_parameter_value().double_value
         self.threshold_open_to_close = self.get_parameter('threshold_open_to_close').get_parameter_value().double_value
         self.min_state_duration = self.get_parameter('min_state_duration').get_parameter_value().double_value
+        self.use_depth_estimation = self.get_parameter('use_depth_estimation').get_parameter_value().bool_value
+        self.depth_window_radius = self.get_parameter('depth_window_radius').get_parameter_value().integer_value
 
         # 固定値設定
         self.camera_width = 640
@@ -69,7 +75,7 @@ class HandPosePublisher(Node):
             10
         )
         
-        # hand_controlトピックのパブリッシャー（常に有効）
+        # hand_controlトピックのパブリッシャー
         self.hand_control_publisher = self.create_publisher(
             MoveHand,
             'hand_control',
@@ -95,7 +101,18 @@ class HandPosePublisher(Node):
 
             # 2D可視化は常に有効
             self.visualizer = Visualizer()
-                
+
+            # 深度推定器の初期化
+            self.depth_estimator = None
+            if self.use_depth_estimation:
+                try:
+                    self.depth_estimator = DepthEstimator(device='cuda')
+                    self.get_logger().info('深度推定器を初期化しました')
+                except Exception as depth_error:
+                    self.get_logger().error(f'深度推定器の初期化に失敗しました: {depth_error}')
+                    self.get_logger().warn('深度推定なしで続行します')
+                    self.use_depth_estimation = False
+
         except Exception as e:
             self.get_logger().error(f'初期化エラー: {e}')
             raise
@@ -109,6 +126,11 @@ class HandPosePublisher(Node):
         self.last_valid_pose: Optional[Pose] = None
         self.last_hand_state: Optional[str] = None
         self.hand_state_confidence: float = 0.0
+
+        # 深度推定関連の状態変数
+        self.last_wrist_depth: Optional[float] = None
+        self.depth_estimation_time: float = 0.0
+        self.mediapipe_time: float = 0.0
         
         self.get_logger().info('='*50)
         self.get_logger().info('Hand Pose Publisher ノードが開始されました')
@@ -130,6 +152,9 @@ class HandPosePublisher(Node):
         self.get_logger().info(f'  平面プランニング使用: {self.use_plane_planning}')
         self.get_logger().info(f'  平面プランニングX: {self.plane_planning_x}')
         self.get_logger().info(f'  Y座標反転: {self.coordinate_y_flip}')
+        self.get_logger().info(f'  深度推定使用: {self.use_depth_estimation}')
+        if self.use_depth_estimation:
+            self.get_logger().info(f'  深度取得窓半径: {self.depth_window_radius}px (円状)')
         self.get_logger().info('='*50)
         self.get_logger().info('キー操作:')
         self.get_logger().info('  Space: セーフティモード（トピック送信停止）')
@@ -137,10 +162,41 @@ class HandPosePublisher(Node):
         self.get_logger().info('  ESC: プログラム終了')
         self.get_logger().info('='*50)
 
+    def get_wrist_pixel_coords(self, pose_result) -> Optional[Tuple[int, int]]:
+        """
+        MediaPipe Poseから右手首の画像座標を取得
+
+        Args:
+            pose_result: MediaPipeのPose検出結果
+
+        Returns:
+            (x, y): 画像座標（ピクセル単位）、取得失敗時はNone
+        """
+        try:
+            if not pose_result or not pose_result.pose_landmarks:
+                return None
+
+            # 右手首のランドマークインデックスは15
+            wrist_landmark = pose_result.pose_landmarks[0][15]
+
+            # 正規化座標（0-1）をピクセル座標に変換
+            wrist_x = int(wrist_landmark.x * self.camera_width)
+            wrist_y = int(wrist_landmark.y * self.camera_height)
+
+            # 画像範囲内かチェック
+            if 0 <= wrist_x < self.camera_width and 0 <= wrist_y < self.camera_height:
+                return (wrist_x, wrist_y)
+            else:
+                return None
+
+        except Exception as e:
+            self.get_logger().error(f'手首座標取得エラー: {e}', throttle_duration_sec=5.0)
+            return None
+
     def draw_safety_status(self, image):
         """
         セーフティモードの状態を画像に描画
-        
+
         Args:
             image: 描画対象の画像
         """
@@ -171,21 +227,49 @@ class HandPosePublisher(Node):
         メインのコールバック関数：フレーム処理と姿勢公開
         """
         try:
+            # MediaPipe処理時間の計測開始
+            mediapipe_start = time.time()
+
             # フレーム取得と処理（ミラー処理込み）
             frame, pose_result, hand_result = self.video_processor.process_frame()
-            
+
             if frame is None:
                 if self.frame_count % 100 == 0:  # 100フレームごとに警告
                     self.get_logger().warn('フレーム取得に失敗しました')
                 return
-            
+
+            # MediaPipe処理時間の計測終了
+            self.mediapipe_time = time.time() - mediapipe_start
+
             self.frame_count += 1
-            
+
+            # 深度推定の実行（並列処理負荷評価のため）
+            depth_map = None
+            wrist_depth = None
+            if self.use_depth_estimation and self.depth_estimator:
+                depth_start = time.time()
+                depth_map = self.depth_estimator.predict(frame)
+                self.depth_estimation_time = time.time() - depth_start
+
+                # 右手首の深度値を取得
+                if depth_map is not None:
+                    wrist_coords = self.get_wrist_pixel_coords(pose_result)
+                    if wrist_coords is not None:
+                        wrist_x, wrist_y = wrist_coords
+                        wrist_depth = self.depth_estimator.get_circular_depth(
+                            depth_map,
+                            wrist_x,
+                            wrist_y,
+                            self.depth_window_radius
+                        )
+                        if wrist_depth is not None:
+                            self.last_wrist_depth = wrist_depth
+
             # 姿勢計算と手の状態判定
             pose_msg = None
             hand_status = "Unknown"
             confidence = 0.0
-            
+
             # Poseモデルから姿勢を計算
             if pose_result and len(pose_result.pose_world_landmarks) > 0:
                 pose_msg = self.pose_calculator.calculate_and_convert_pose(
@@ -234,22 +318,34 @@ class HandPosePublisher(Node):
                     # 状態を保存（セーフティモードに関係なく更新）
                     self.hand_state_confidence = confidence
                         
-                    if self.frame_count % 30 == 0:  # 1秒おきにログ出力（30FPSの場合）
-                        if self.safety_mode:
-                            self.get_logger().info(f'[SAFETY MODE] 手の姿勢を検出中（送信停止）: Frame {self.frame_count}')
-                        else:
-                            self.get_logger().info(f'手の姿勢を検出・公開中: Frame {self.frame_count}')
-                        
+                    if self.frame_count % 1 == 0:  # ログ出力
+                        # if self.safety_mode:
+                        #     self.get_logger().info(f'[SAFETY MODE] 手の姿勢を検出中（送信停止）: Frame {self.frame_count}')
+                        # else:
+                        #     self.get_logger().info(f'手の姿勢を検出・公開中: Frame {self.frame_count}')
+
+                        # self.get_logger().info(
+                        #     f"Position: ({pose_msg.position.x:.3f}, {pose_msg.position.y:.3f}, {pose_msg.position.z:.3f})"
+                        # )
+                        # self.get_logger().info(
+                        #     f"Orientation: ({pose_msg.orientation.x:.3f}, {pose_msg.orientation.y:.3f}, "
+                        #     f"{pose_msg.orientation.z:.3f}, {pose_msg.orientation.w:.3f})"
+                        # )
+                        # self.get_logger().info(
+                        #     f"Hand Status: {hand_status} (Confidence: {confidence:.3f}) "
+                        #     f"[Using Hands model]"
+                        # )
+
+                        # 深度推定の結果と処理時間を表示
+                        if self.use_depth_estimation:
+                            wrist_depth_str = f"{self.last_wrist_depth:.3f}" if self.last_wrist_depth is not None else 'N/A'
+                            self.get_logger().info(
+                                f"Depth Estimation: wrist_depth={wrist_depth_str}, "
+                                f"time={self.depth_estimation_time*1000:.1f}ms"
+                            )
                         self.get_logger().info(
-                            f"Position: ({pose_msg.position.x:.3f}, {pose_msg.position.y:.3f}, {pose_msg.position.z:.3f})"
-                        )
-                        self.get_logger().info(
-                            f"Orientation: ({pose_msg.orientation.x:.3f}, {pose_msg.orientation.y:.3f}, "
-                            f"{pose_msg.orientation.z:.3f}, {pose_msg.orientation.w:.3f})"
-                        )
-                        self.get_logger().info(
-                            f"Hand Status: {hand_status} (Confidence: {confidence:.3f}) "
-                            f"[Using Hands model]"
+                            f"Processing Time: MediaPipe={self.mediapipe_time*1000:.1f}ms, "
+                            f"Total={self.video_processor.get_fps():.1f}fps"
                         )
 
             # 可視化（常に有効）
@@ -307,10 +403,12 @@ class HandPosePublisher(Node):
                 self.video_processor.cleanup()
             if hasattr(self, 'visualizer') and self.visualizer:
                 self.visualizer.cleanup()
+            if hasattr(self, 'depth_estimator') and self.depth_estimator:
+                self.depth_estimator.cleanup()
             cv2.destroyAllWindows()
         except Exception as e:
             self.get_logger().error(f'クリーンアップエラー: {e}')
-        
+
         super().destroy_node()
 
 
