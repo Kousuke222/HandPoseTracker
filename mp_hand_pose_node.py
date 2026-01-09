@@ -36,7 +36,7 @@ class HandPosePublisher(Node):
         self.declare_parameter('hand_open_threshold', 0.4)  # 手の開閉判定閾値
         self.declare_parameter('dynamixel_id', 1)  # Dynamixel ID
         self.declare_parameter('fixed_orientation_planning', True)
-        self.declare_parameter('use_plane_planning', True)  # 平面プランニングの使用
+        self.declare_parameter('use_plane_planning', False)  # 平面プランニングの使用
         self.declare_parameter('plane_planning_x', 0.3)  # 平面プランニングのX座標
         self.declare_parameter('coordinate_y_flip', True)  # Y座標反転
         self.declare_parameter('threshold_close_to_open', 0.1)  # 閉→開の閾値
@@ -44,6 +44,12 @@ class HandPosePublisher(Node):
         self.declare_parameter('min_state_duration', 0.15)  # 状態変化の最小持続時間（秒）
         self.declare_parameter('use_depth_estimation', True)  # 深度推定の使用
         self.declare_parameter('depth_window_radius', 5)  # 深度取得の円状領域の半径（ピクセル）
+        # 深度マッピングパラメータ
+        self.declare_parameter('depth_map_min', 2.0)  # 深度マップの最小値
+        self.declare_parameter('depth_map_max', 8.0)  # 深度マップの最大値
+        self.declare_parameter('real_depth_min', 0.05)  # 実際の距離の最小値（m）
+        self.declare_parameter('real_depth_max', 1.5)  # 実際の距離の最大値（m）
+        self.declare_parameter('depth_offset_forward', -0.1)  # 深度補正値の前方へのオフセット (m)
 
         # パラメータの取得
         self.camera_device = self.get_parameter('camera_device').get_parameter_value().integer_value
@@ -59,6 +65,11 @@ class HandPosePublisher(Node):
         self.min_state_duration = self.get_parameter('min_state_duration').get_parameter_value().double_value
         self.use_depth_estimation = self.get_parameter('use_depth_estimation').get_parameter_value().bool_value
         self.depth_window_radius = self.get_parameter('depth_window_radius').get_parameter_value().integer_value
+        self.depth_map_min = self.get_parameter('depth_map_min').get_parameter_value().double_value
+        self.depth_map_max = self.get_parameter('depth_map_max').get_parameter_value().double_value
+        self.real_depth_min = self.get_parameter('real_depth_min').get_parameter_value().double_value
+        self.real_depth_max = self.get_parameter('real_depth_max').get_parameter_value().double_value
+        self.depth_offset_forward = self.get_parameter('depth_offset_forward').get_parameter_value().double_value
 
         # 固定値設定
         self.camera_width = 640
@@ -131,6 +142,12 @@ class HandPosePublisher(Node):
         self.last_wrist_depth: Optional[float] = None
         self.depth_estimation_time: float = 0.0
         self.mediapipe_time: float = 0.0
+        self.last_original_x: Optional[float] = None
+        self.last_corrected_x: Optional[float] = None
+
+        # raw_depthの最小値・最大値の記録（キャリブレーション用）
+        self.recorded_depth_min: Optional[float] = None
+        self.recorded_depth_max: Optional[float] = None
         
         self.get_logger().info('='*50)
         self.get_logger().info('Hand Pose Publisher ノードが開始されました')
@@ -155,6 +172,8 @@ class HandPosePublisher(Node):
         self.get_logger().info(f'  深度推定使用: {self.use_depth_estimation}')
         if self.use_depth_estimation:
             self.get_logger().info(f'  深度取得窓半径: {self.depth_window_radius}px (円状)')
+            self.get_logger().info(f'  深度マップ範囲: {self.depth_map_min} ～ {self.depth_map_max}')
+            self.get_logger().info(f'  実距離範囲: {self.real_depth_min}m ～ {self.real_depth_max}m')
         self.get_logger().info('='*50)
         self.get_logger().info('キー操作:')
         self.get_logger().info('  Space: セーフティモード（トピック送信停止）')
@@ -191,6 +210,34 @@ class HandPosePublisher(Node):
 
         except Exception as e:
             self.get_logger().error(f'手首座標取得エラー: {e}', throttle_duration_sec=5.0)
+            return None
+
+    def convert_depth_to_real_distance(self, depth_value: float) -> Optional[float]:
+        """
+        深度マップの値を実際の距離（メートル）に変換
+
+        Args:
+            depth_value: 深度マップから取得した値
+
+        Returns:
+            実際の距離（メートル）、変換失敗時はNone
+        """
+        try:
+            # 深度マップの値域チェック
+            if depth_value < self.depth_map_min or depth_value > self.depth_map_max:
+                # 範囲外の場合はクランプ
+                depth_value = max(self.depth_map_min, min(self.depth_map_max, depth_value))
+
+            # 正規化 (0-1)
+            normalized = (depth_value - self.depth_map_min) / (self.depth_map_max - self.depth_map_min)
+
+            # 実際の距離に変換
+            real_distance = self.real_depth_min + normalized * (self.real_depth_max - self.real_depth_min)
+
+            return float(real_distance)
+
+        except Exception as e:
+            self.get_logger().error(f'深度変換エラー: {e}', throttle_duration_sec=5.0)
             return None
 
     def draw_safety_status(self, image):
@@ -265,6 +312,12 @@ class HandPosePublisher(Node):
                         if wrist_depth is not None:
                             self.last_wrist_depth = wrist_depth
 
+                            # 記録された最小値・最大値を更新
+                            if self.recorded_depth_min is None or wrist_depth < self.recorded_depth_min:
+                                self.recorded_depth_min = wrist_depth
+                            if self.recorded_depth_max is None or wrist_depth > self.recorded_depth_max:
+                                self.recorded_depth_max = wrist_depth
+
             # 姿勢計算と手の状態判定
             pose_msg = None
             hand_status = "Unknown"
@@ -284,6 +337,14 @@ class HandPosePublisher(Node):
                     )
                 
                 if pose_msg:
+                    # 深度推定による奥行き補正（平面プランニング無効時のみ）
+                    self.last_original_x = pose_msg.position.x
+                    self.last_corrected_x = None
+                    if self.use_depth_estimation and not self.use_plane_planning and self.last_wrist_depth is not None:
+                        self.last_corrected_x = self.convert_depth_to_real_distance(self.last_wrist_depth)
+                        if self.last_corrected_x is not None:
+                            pose_msg.position.x = self.last_corrected_x + self.depth_offset_forward
+
                     if self.use_plane_planning:
                         # 平面プランニングを使用する場合
                         # x座標を平面プランニングの値に設定
@@ -318,15 +379,15 @@ class HandPosePublisher(Node):
                     # 状態を保存（セーフティモードに関係なく更新）
                     self.hand_state_confidence = confidence
                         
-                    if self.frame_count % 1 == 0:  # ログ出力
+                    if self.frame_count % 5 == 0:  # 5フレームごとにログ出力
                         # if self.safety_mode:
                         #     self.get_logger().info(f'[SAFETY MODE] 手の姿勢を検出中（送信停止）: Frame {self.frame_count}')
                         # else:
                         #     self.get_logger().info(f'手の姿勢を検出・公開中: Frame {self.frame_count}')
 
-                        # self.get_logger().info(
-                        #     f"Position: ({pose_msg.position.x:.3f}, {pose_msg.position.y:.3f}, {pose_msg.position.z:.3f})"
-                        # )
+                        self.get_logger().info(
+                            f"Position: ({pose_msg.position.x:.3f}, {pose_msg.position.y:.3f}, {pose_msg.position.z:.3f})"
+                        )
                         # self.get_logger().info(
                         #     f"Orientation: ({pose_msg.orientation.x:.3f}, {pose_msg.orientation.y:.3f}, "
                         #     f"{pose_msg.orientation.z:.3f}, {pose_msg.orientation.w:.3f})"
@@ -339,9 +400,24 @@ class HandPosePublisher(Node):
                         # 深度推定の結果と処理時間を表示
                         if self.use_depth_estimation:
                             wrist_depth_str = f"{self.last_wrist_depth:.3f}" if self.last_wrist_depth is not None else 'N/A'
+                            recorded_min_str = f"{self.recorded_depth_min:.3f}" if self.recorded_depth_min is not None else 'N/A'
+                            recorded_max_str = f"{self.recorded_depth_max:.3f}" if self.recorded_depth_max is not None else 'N/A'
+
+                            if self.last_corrected_x is not None and not self.use_plane_planning:
+                                self.get_logger().info(
+                                    f"Depth Correction: raw_depth={wrist_depth_str}, "
+                                    f"original_x={self.last_original_x:.3f}m, corrected_x={self.last_corrected_x:.3f}m, "
+                                    f"time={self.depth_estimation_time*1000:.1f}ms"
+                                )
+                            else:
+                                self.get_logger().info(
+                                    f"Depth Estimation: wrist_depth={wrist_depth_str}, "
+                                    f"time={self.depth_estimation_time*1000:.1f}ms"
+                                )
+
+                            # 記録された最小値・最大値を表示
                             self.get_logger().info(
-                                f"Depth Estimation: wrist_depth={wrist_depth_str}, "
-                                f"time={self.depth_estimation_time*1000:.1f}ms"
+                                f"Recorded Depth Range: min={recorded_min_str}, max={recorded_max_str}"
                             )
                         self.get_logger().info(
                             f"Processing Time: MediaPipe={self.mediapipe_time*1000:.1f}ms, "
