@@ -42,7 +42,7 @@ class HandPosePublisher(Node):
         self.declare_parameter('threshold_close_to_open', 0.1)  # 閉→開の閾値
         self.declare_parameter('threshold_open_to_close', 0.45)  # 開→閉の閾値
         self.declare_parameter('min_state_duration', 0.15)  # 状態変化の最小持続時間（秒）
-        self.declare_parameter('use_depth_estimation', False)  # 深度推定の使用
+        self.declare_parameter('use_depth_estimation', True)  # 深度推定の使用
         self.declare_parameter('depth_window_radius', 5)  # 深度取得の円状領域の半径（ピクセル）
 
         # パラメータの取得
