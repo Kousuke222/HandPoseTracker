@@ -50,7 +50,7 @@ class HandPosePublisher(Node):
         self.declare_parameter('real_depth_min', 0.05)  # 実際の距離の最小値（m）
         self.declare_parameter('real_depth_max', 1.5)  # 実際の距離の最大値（m）
         self.declare_parameter('depth_offset_forward', -0.1)  # 深度補正値の前方へのオフセット (m)
-
+        
         # パラメータの取得
         self.camera_device = self.get_parameter('camera_device').get_parameter_value().integer_value
         self.publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
@@ -434,7 +434,8 @@ class HandPosePublisher(Node):
                     hand_result,
                     self.video_processor.get_fps(),
                     hand_status=hand_status,
-                    hand_confidence=confidence
+                    hand_confidence=confidence,
+                    wrist_depth=self.last_wrist_depth
                 )
 
                 # セーフティモードの状態を描画

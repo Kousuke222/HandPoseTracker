@@ -56,17 +56,18 @@ class Visualizer:
         print(f"Visualizer初期化完了（2Dのみ）")
 
     def draw_2d_landmarks_with_hands(
-        self, 
-        image: np.ndarray, 
+        self,
+        image: np.ndarray,
         pose_result: Optional[vision.PoseLandmarkerResult],
         hand_result: Optional[Dict],
         fps: float = 0.0,
         hand_status: str = "Unknown",
-        hand_confidence: float = 0.0
+        hand_confidence: float = 0.0,
+        wrist_depth: Optional[float] = None
     ) -> np.ndarray:
         """
         2D画像上にPoseとHandsの両方のランドマークを描画
-        
+
         Args:
             image: 描画対象の画像
             pose_result: Poseの検出結果
@@ -74,12 +75,13 @@ class Visualizer:
             fps: FPS値
             hand_status: 手の開閉状態
             hand_confidence: 状態判定の信頼度
-            
+            wrist_depth: 手首の深度値（RAW）
+
         Returns:
             描画済みの画像
         """
         if pose_result is None and hand_result is None:
-            return self._draw_fps_and_status_only(image, fps, hand_status, hand_confidence)
+            return self._draw_fps_and_status_only(image, fps, hand_status, hand_confidence, wrist_depth)
         
         try:
             image_height, image_width = image.shape[:2]
@@ -120,8 +122,8 @@ class Visualizer:
                 )
             
             # FPSと手の状態表示
-            self._draw_fps_and_hand_status(image, fps, hand_status, hand_confidence)
-            
+            self._draw_fps_and_hand_status(image, fps, hand_status, hand_confidence, wrist_depth)
+
             return image
             
         except Exception as e:
@@ -313,14 +315,15 @@ class Visualizer:
             )
 
     def _draw_fps_and_hand_status(
-        self, 
-        image: np.ndarray, 
+        self,
+        image: np.ndarray,
         fps: float,
         hand_status: str,
-        confidence: float
+        confidence: float,
+        wrist_depth: Optional[float] = None
     ) -> None:
         """
-        FPS情報と手の開閉状態を描画
+        FPS情報と手の開閉状態、深度値を描画
         """
         # FPS表示
         cv2.putText(
@@ -332,7 +335,7 @@ class Visualizer:
             self.config.font_thickness,
             cv2.LINE_AA
         )
-        
+
         # 手の開閉状態表示
         if hand_status == 'O':
             status_color = (0, 255, 0)  # 緑
@@ -343,7 +346,7 @@ class Visualizer:
         else:
             status_color = (128, 128, 128)  # グレー
             status_text = "UNKNOWN"
-        
+
         status_position = (10, 70)
         cv2.putText(
             image, f"Hand Status: {status_text} ({confidence:.2f})",
@@ -355,17 +358,37 @@ class Visualizer:
             cv2.LINE_AA
         )
 
+        # 手首の深度値表示
+        depth_position = (10, 200)
+        if wrist_depth is not None:
+            depth_text = f"Wrist Depth : {wrist_depth:.3f}"
+            depth_color = (0, 0, 255)  # 赤
+        else:
+            depth_text = "Wrist Depth : N/A"
+            depth_color = (128, 128, 128)  # グレー
+
+        cv2.putText(
+            image, depth_text,
+            depth_position,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            depth_color,
+            2,
+            cv2.LINE_AA
+        )
+
     def _draw_fps_and_status_only(
-        self, 
-        image: np.ndarray, 
+        self,
+        image: np.ndarray,
         fps: float,
         hand_status: str,
-        confidence: float
+        confidence: float,
+        wrist_depth: Optional[float] = None
     ) -> np.ndarray:
         """
         検出結果がない場合のFPSと状態表示のみ
         """
-        self._draw_fps_and_hand_status(image, fps, hand_status, confidence)
+        self._draw_fps_and_hand_status(image, fps, hand_status, confidence, wrist_depth)
         
         # "NO DETECTION"メッセージ
         text = "NO POSE/HAND DETECTED"
