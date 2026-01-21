@@ -45,11 +45,24 @@ class HandPosePublisher(Node):
         self.declare_parameter('use_depth_estimation', True)  # 深度推定の使用
         self.declare_parameter('depth_window_radius', 5)  # 深度取得の円状領域の半径（ピクセル）
         # 深度マッピングパラメータ
-        self.declare_parameter('depth_map_min', 2.0)  # 深度マップの最小値
-        self.declare_parameter('depth_map_max', 8.0)  # 深度マップの最大値
-        self.declare_parameter('real_depth_min', 0.05)  # 実際の距離の最小値（m）
-        self.declare_parameter('real_depth_max', 1.5)  # 実際の距離の最大値（m）
-        self.declare_parameter('depth_offset_forward', -0.1)  # 深度補正値の前方へのオフセット (m)
+        # self.declare_parameter('depth_map_min', 2.0)  # 深度マップの最小値2
+        # self.declare_parameter('depth_map_max', 8.0)  # 深度マップの最大値8
+        # self.declare_parameter('real_depth_min', 0.05)  # 実際の距離の最小値（m）
+        # self.declare_parameter('real_depth_max', 1.5)  # 実際の距離の最大値（m）
+        # self.declare_parameter('depth_offset_forward', -0.15)  # 深度補正値の前方へのオフセット (m)
+        self.declare_parameter('depth_map_min', 2.0)  # 深度マップの最小値2
+        self.declare_parameter('depth_map_max', 8.0)  # 深度マップの最大値8
+        self.declare_parameter('real_depth_min', 0.2)  # 実際の距離の最小値（m）
+        self.declare_parameter('real_depth_max', 0.5)  # 実際の距離の最大値（m）
+        self.declare_parameter('depth_offset_forward', 0)  # 深度補正値の前方へのオフセット (m)
+        self.declare_parameter('use_adaptive_depth_range', False)  # 動的な深度範囲更新の使用
+        # 動作範囲パラメータ(ros2座標系、メートル単位)
+        self.declare_parameter('pose_x_min', 0.2) # 前方(xarm正面から見て)
+        self.declare_parameter('pose_x_max', 0.5) # 後方
+        self.declare_parameter('pose_y_min', -0.35) # 左
+        self.declare_parameter('pose_y_max', 0.35) # 右
+        self.declare_parameter('pose_z_min', 0.275) # 下
+        self.declare_parameter('pose_z_max', 0.7) # 上
 
         # パラメータの取得
         self.camera_device = self.get_parameter('camera_device').get_parameter_value().integer_value
@@ -70,6 +83,13 @@ class HandPosePublisher(Node):
         self.real_depth_min = self.get_parameter('real_depth_min').get_parameter_value().double_value
         self.real_depth_max = self.get_parameter('real_depth_max').get_parameter_value().double_value
         self.depth_offset_forward = self.get_parameter('depth_offset_forward').get_parameter_value().double_value
+        self.use_adaptive_depth_range = self.get_parameter('use_adaptive_depth_range').get_parameter_value().bool_value
+        self.pose_x_min = self.get_parameter('pose_x_min').get_parameter_value().double_value
+        self.pose_x_max = self.get_parameter('pose_x_max').get_parameter_value().double_value
+        self.pose_y_min = self.get_parameter('pose_y_min').get_parameter_value().double_value
+        self.pose_y_max = self.get_parameter('pose_y_max').get_parameter_value().double_value
+        self.pose_z_min = self.get_parameter('pose_z_min').get_parameter_value().double_value
+        self.pose_z_max = self.get_parameter('pose_z_max').get_parameter_value().double_value
 
         # 固定値設定
         self.camera_width = 640
@@ -174,9 +194,13 @@ class HandPosePublisher(Node):
             self.get_logger().info(f'  深度取得窓半径: {self.depth_window_radius}px (円状)')
             self.get_logger().info(f'  深度マップ範囲: {self.depth_map_min} ～ {self.depth_map_max}')
             self.get_logger().info(f'  実距離範囲: {self.real_depth_min}m ～ {self.real_depth_max}m')
+            self.get_logger().info(f'  動的深度範囲更新: {self.use_adaptive_depth_range}')
+        self.get_logger().info(f'  動作範囲 X: {self.pose_x_min}m ～ {self.pose_x_max}m')
+        self.get_logger().info(f'  動作範囲 Y: {self.pose_y_min}m ～ {self.pose_y_max}m')
+        self.get_logger().info(f'  動作範囲 Z: {self.pose_z_min}m ～ {self.pose_z_max}m')
         self.get_logger().info('='*50)
         self.get_logger().info('キー操作:')
-        self.get_logger().info('  Space: セーフティモード（トピック送信停止）')
+        self.get_logger().info('  Space: セーフティモード（トピック送信停止）') 
         self.get_logger().info('  S: セーフティモード解除')
         self.get_logger().info('  ESC: プログラム終了')
         self.get_logger().info('='*50)
@@ -223,13 +247,32 @@ class HandPosePublisher(Node):
             実際の距離（メートル）、変換失敗時はNone
         """
         try:
+            # 適応的な深度マップ範囲を使用（機能が有効で、recorded値が有効な場合）
+            if (self.use_adaptive_depth_range and
+                self.recorded_depth_min is not None and
+                self.recorded_depth_max is not None):
+                depth_min = self.recorded_depth_min
+                depth_max = self.recorded_depth_max
+            else:
+                # 機能無効時、またはrecorded値が未確定の場合はパラメータ値を使用
+                depth_min = self.depth_map_min
+                depth_max = self.depth_map_max
+
+            # ゼロ除算防止：最小範囲を確保
+            if abs(depth_max - depth_min) < 0.001:
+                depth_max = depth_min + 0.1
+                self.get_logger().warn(
+                    f'深度範囲が極端に狭いため、最小範囲(0.1)を設定しました: min={depth_min:.3f}',
+                    throttle_duration_sec=5.0
+                )
+
             # 深度マップの値域チェック
-            if depth_value < self.depth_map_min or depth_value > self.depth_map_max:
+            if depth_value < depth_min or depth_value > depth_max:
                 # 範囲外の場合はクランプ
-                depth_value = max(self.depth_map_min, min(self.depth_map_max, depth_value))
+                depth_value = max(depth_min, min(depth_max, depth_value))
 
             # 正規化 (0-1)
-            normalized = (depth_value - self.depth_map_min) / (self.depth_map_max - self.depth_map_min)
+            normalized = (depth_value - depth_min) / (depth_max - depth_min)
 
             # 実際の距離に変換
             real_distance = self.real_depth_min + normalized * (self.real_depth_max - self.real_depth_min)
@@ -353,7 +396,12 @@ class HandPosePublisher(Node):
                     if self.coordinate_y_flip:
                         # Y座標を反転
                         pose_msg.position.y = -pose_msg.position.y
-                        
+
+                    # 動作範囲にクランプ
+                    pose_msg.position.x = max(self.pose_x_min, min(self.pose_x_max, pose_msg.position.x))
+                    pose_msg.position.y = max(self.pose_y_min, min(self.pose_y_max, pose_msg.position.y))
+                    pose_msg.position.z = max(self.pose_z_min, min(self.pose_z_max, pose_msg.position.z))
+
                     self.last_valid_pose = pose_msg
                     
                     # セーフティモードでない場合のみトピックを公開
@@ -419,6 +467,24 @@ class HandPosePublisher(Node):
                             self.get_logger().info(
                                 f"Recorded Depth Range: min={recorded_min_str}, max={recorded_max_str}"
                             )
+
+                            # 深度マップの適応状態を表示
+                            if not self.use_adaptive_depth_range:
+                                self.get_logger().info(
+                                    f"Depth Map Range (Fixed): min={self.depth_map_min:.3f}, "
+                                    f"max={self.depth_map_max:.3f} (Adaptive feature disabled)"
+                                )
+                            elif self.recorded_depth_min is not None and self.recorded_depth_max is not None:
+                                self.get_logger().info(
+                                    f"Depth Map Range (Adaptive): min={self.recorded_depth_min:.3f}, "
+                                    f"max={self.recorded_depth_max:.3f} "
+                                    f"(Original params: {self.depth_map_min:.3f}-{self.depth_map_max:.3f})"
+                                )
+                            else:
+                                self.get_logger().info(
+                                    f"Depth Map Range (Using params): min={self.depth_map_min:.3f}, "
+                                    f"max={self.depth_map_max:.3f} (Adaptive not ready)"
+                                )
                         self.get_logger().info(
                             f"Processing Time: MediaPipe={self.mediapipe_time*1000:.1f}ms, "
                             f"Total={self.video_processor.get_fps():.1f}fps"
