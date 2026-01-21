@@ -63,7 +63,10 @@ class Visualizer:
         fps: float = 0.0,
         hand_status: str = "Unknown",
         hand_confidence: float = 0.0,
-        wrist_depth: Optional[float] = None
+        wrist_depth: Optional[float] = None,
+        depth_map_min: Optional[float] = None,
+        depth_map_max: Optional[float] = None,
+        depth_offset_forward: Optional[float] = None
     ) -> np.ndarray:
         """
         2D画像上にPoseとHandsの両方のランドマークを描画
@@ -81,7 +84,8 @@ class Visualizer:
             描画済みの画像
         """
         if pose_result is None and hand_result is None:
-            return self._draw_fps_and_status_only(image, fps, hand_status, hand_confidence, wrist_depth)
+            return self._draw_fps_and_status_only(image, fps, hand_status, hand_confidence, wrist_depth,
+                                                   depth_map_min, depth_map_max, depth_offset_forward)
         
         try:
             image_height, image_width = image.shape[:2]
@@ -122,7 +126,8 @@ class Visualizer:
                 )
             
             # FPSと手の状態表示
-            self._draw_fps_and_hand_status(image, fps, hand_status, hand_confidence, wrist_depth)
+            self._draw_fps_and_hand_status(image, fps, hand_status, hand_confidence, wrist_depth,
+                                           depth_map_min, depth_map_max, depth_offset_forward)
 
             return image
             
@@ -320,7 +325,10 @@ class Visualizer:
         fps: float,
         hand_status: str,
         confidence: float,
-        wrist_depth: Optional[float] = None
+        wrist_depth: Optional[float] = None,
+        depth_map_min: Optional[float] = None,
+        depth_map_max: Optional[float] = None,
+        depth_offset_forward: Optional[float] = None
     ) -> None:
         """
         FPS情報と手の開閉状態、深度値を描画
@@ -377,18 +385,47 @@ class Visualizer:
             cv2.LINE_AA
         )
 
+        # 深度マッピングパラメーター表示
+        if depth_map_min is not None and depth_map_max is not None:
+            depth_map_text = f"Depth Map: min={depth_map_min:.2f} max={depth_map_max:.2f}"
+            cv2.putText(
+                image, depth_map_text,
+                (10, 230),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 0),  # 黄色
+                2,
+                cv2.LINE_AA
+            )
+
+        if depth_offset_forward is not None:
+            offset_text = f"Depth Offset: {depth_offset_forward:.2f}"
+            cv2.putText(
+                image, offset_text,
+                (10, 255),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 0),  # 黄色
+                2,
+                cv2.LINE_AA
+            )
+
     def _draw_fps_and_status_only(
         self,
         image: np.ndarray,
         fps: float,
         hand_status: str,
         confidence: float,
-        wrist_depth: Optional[float] = None
+        wrist_depth: Optional[float] = None,
+        depth_map_min: Optional[float] = None,
+        depth_map_max: Optional[float] = None,
+        depth_offset_forward: Optional[float] = None
     ) -> np.ndarray:
         """
         検出結果がない場合のFPSと状態表示のみ
         """
-        self._draw_fps_and_hand_status(image, fps, hand_status, confidence, wrist_depth)
+        self._draw_fps_and_hand_status(image, fps, hand_status, confidence, wrist_depth,
+                                       depth_map_min, depth_map_max, depth_offset_forward)
         
         # "NO DETECTION"メッセージ
         text = "NO POSE/HAND DETECTED"

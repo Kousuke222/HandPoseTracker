@@ -45,11 +45,11 @@ class HandPosePublisher(Node):
         self.declare_parameter('use_depth_estimation', True)  # 深度推定の使用
         self.declare_parameter('depth_window_radius', 5)  # 深度取得の円状領域の半径（ピクセル）
         # 深度マッピングパラメータ
-        self.declare_parameter('depth_map_min', 2.0)  # 深度マップの最小値
-        self.declare_parameter('depth_map_max', 8.0)  # 深度マップの最大値
+        self.declare_parameter('depth_map_min', 3.5)  # 深度マップの最小値
+        self.declare_parameter('depth_map_max', 7.0)  # 深度マップの最大値
         self.declare_parameter('real_depth_min', 0.05)  # 実際の距離の最小値（m）
         self.declare_parameter('real_depth_max', 1.5)  # 実際の距離の最大値（m）
-        self.declare_parameter('depth_offset_forward', -0.1)  # 深度補正値の前方へのオフセット (m)
+        self.declare_parameter('depth_offset_forward', -0.5)  # 深度補正値の前方へのオフセット (m)
         
         # パラメータの取得
         self.camera_device = self.get_parameter('camera_device').get_parameter_value().integer_value
@@ -179,6 +179,9 @@ class HandPosePublisher(Node):
         self.get_logger().info('  Space: セーフティモード（トピック送信停止）')
         self.get_logger().info('  S: セーフティモード解除')
         self.get_logger().info('  ESC: プログラム終了')
+        self.get_logger().info('  ←/→: depth_map_min 調整 (±0.05)')
+        self.get_logger().info('  ↑/↓: depth_map_max 調整 (±0.05)')
+        self.get_logger().info('  O/P: depth_offset_forward 調整 (±0.05)')
         self.get_logger().info('='*50)
 
     def get_wrist_pixel_coords(self, pose_result) -> Optional[Tuple[int, int]]:
@@ -435,7 +438,10 @@ class HandPosePublisher(Node):
                     self.video_processor.get_fps(),
                     hand_status=hand_status,
                     hand_confidence=confidence,
-                    wrist_depth=self.last_wrist_depth
+                    wrist_depth=self.last_wrist_depth,
+                    depth_map_min=self.depth_map_min,
+                    depth_map_max=self.depth_map_max,
+                    depth_offset_forward=self.depth_offset_forward
                 )
 
                 # セーフティモードの状態を描画
@@ -464,7 +470,32 @@ class HandPosePublisher(Node):
                         self.safety_mode_changed = True
                         self.get_logger().info('セーフティモード: 解除 - トピック送信を再開しました')
                         self.get_logger().info("'Space'キーでセーフティモードを有効化できます")
-                    
+
+                # 深度パラメーター調整キー
+                elif key == ord('n'):  # 左矢印 - depth_map_min を減少
+                    self.depth_map_min -= 0.05
+                    self.get_logger().info(f'depth_map_min: {self.depth_map_min:.2f}')
+
+                elif key == ord('m'):  # 右矢印 - depth_map_min を増加
+                    self.depth_map_min += 0.05
+                    self.get_logger().info(f'depth_map_min: {self.depth_map_min:.2f}')
+
+                elif key == ord('l'):  # 上矢印 - depth_map_max を増加
+                    self.depth_map_max += 0.05
+                    self.get_logger().info(f'depth_map_max: {self.depth_map_max:.2f}')
+
+                elif key == ord('k'):  # 下矢印 - depth_map_max を減少
+                    self.depth_map_max -= 0.05
+                    self.get_logger().info(f'depth_map_max: {self.depth_map_max:.2f}')
+
+                elif key == ord('o') or key == ord('O'):  # O - offset を減少
+                    self.depth_offset_forward -= 0.05
+                    self.get_logger().info(f'depth_offset_forward: {self.depth_offset_forward:.2f}')
+
+                elif key == ord('p') or key == ord('P'):  # P - offset を増加
+                    self.depth_offset_forward += 0.05
+                    self.get_logger().info(f'depth_offset_forward: {self.depth_offset_forward:.2f}')
+
         except KeyboardInterrupt:
             raise
         except Exception as e:
