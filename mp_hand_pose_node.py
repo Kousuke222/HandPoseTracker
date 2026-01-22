@@ -226,6 +226,10 @@ class HandPosePublisher(Node):
             実際の距離（メートル）、変換失敗時はNone
         """
         try:
+            # # 深度値を四捨五入（揺れ抑制）
+            # depth_value = round(depth_value, 3)
+            # # 例：3.4777801036834717→3.478
+
             # 深度マップの値域チェック
             if depth_value < self.depth_map_min or depth_value > self.depth_map_max:
                 # 範囲外の場合はクランプ
